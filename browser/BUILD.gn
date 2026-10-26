@@ -1,0 +1,12 @@
+# Copyright 2026 The Umbra Authors.
+
+source_set("browser") {
+  sources = [
+    "umbra_prefs.cc",
+    "umbra_prefs.h",
+  ]
+  deps = [
+    "//base",
+    "//components/prefs",
+  ]
+}

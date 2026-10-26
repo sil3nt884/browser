@@ -1,0 +1,10 @@
+android_resources("chrome_app_java_resources") {
+  deps = [ "//foo" ]
+}
+
+android_library("chrome_java") {
+  deps = [
+    ":chrome_app_java_resources",
+    "//base:base_java",
+  ]
+}

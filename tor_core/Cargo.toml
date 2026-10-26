@@ -1,0 +1,41 @@
+[package]
+name = "umbra_tor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "In-process Tor (Arti) with a local SOCKS5 front door, exposed over a C ABI for the Umbra browser."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+# cdylib: a self-contained .dll/.so with only our #[no_mangle] symbols exported,
+# so its Rust std never collides with the Rust std that Chromium links itself.
+# rlib: lets `cargo test` exercise the code.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+arti-client = { version = "0.47", default-features = false, features = [
+  "tokio",
+  "rustls",
+  "compression",
+  "static-sqlite",
+  "onion-service-client",
+] }
+tor-rtcompat = { version = "0.47", default-features = false, features = ["tokio", "rustls"] }
+# Arti's rustls needs one crypto backend chosen explicitly. `ring` cross-compiles
+# to Windows (MSVC) and Android (NDK) without cmake/nasm, unlike aws-lc-rs.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "test-util"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"   # we catch panics at the FFI boundary
+strip = "symbols"

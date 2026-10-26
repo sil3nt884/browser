@@ -1,0 +1,5 @@
+# Windows (built on Windows with Visual Studio 2022).
+target_os = "win"
+
+# Use the locally installed Visual Studio toolchain.
+# (scripts/build.py also sets DEPOT_TOOLS_WIN_TOOLCHAIN=0.)

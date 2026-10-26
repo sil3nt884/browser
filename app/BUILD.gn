@@ -1,0 +1,16 @@
+# Copyright 2026 The Umbra Authors.
+
+source_set("app") {
+  sources = [
+    "tor_library.cc",
+    "tor_library.h",
+    "umbra_startup.cc",
+    "umbra_startup.h",
+  ]
+  deps = [
+    "//base",
+    "//umbra/common",
+    "//umbra/tor_core:headers",
+    "//umbra/tor_core:runtime",
+  ]
+}

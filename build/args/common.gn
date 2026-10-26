@@ -1,0 +1,22 @@
+# Shared GN args for every Umbra build. scripts/build.py concatenates this,
+# the per-target file and target_cpu into out/<dir>/args.gn.
+
+is_debug = false
+is_component_build = false
+dcheck_always_on = false
+
+# Fast links, small binaries. Raise to 1 or 2 when you need crash symbols.
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+
+# H.264/AAC playback. Check the codec licensing situation for your
+# distribution before shipping binaries built this way.
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# No Google API keys baked in: sync, translate etc. stay off.
+use_official_google_api_keys = false
+
+# Profile-guided optimisation profiles are Google's; skip them.
+chrome_pgo_phase = 0

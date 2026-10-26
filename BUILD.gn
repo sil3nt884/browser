@@ -1,0 +1,16 @@
+# Copyright 2026 The Umbra Authors.
+#
+# Umbra lives at //umbra inside a Chromium checkout. Chromium's own targets
+# pick up these pieces through the hook edits in scripts/hooks.py:
+#   //chrome/browser:browser   -> //umbra/app, //umbra/browser
+#   //chrome/renderer:renderer -> //umbra/renderer
+#   //chrome/android:chrome_java -> //umbra/tor_core:runtime_assets (Android)
+
+group("umbra") {
+  deps = [
+    "//umbra/app",
+    "//umbra/browser",
+    "//umbra/common",
+    "//umbra/renderer",
+  ]
+}

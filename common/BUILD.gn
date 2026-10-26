@@ -1,0 +1,5 @@
+# Copyright 2026 The Umbra Authors.
+
+source_set("common") {
+  sources = [ "umbra_switches.h" ]
+}

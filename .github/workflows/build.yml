@@ -1,0 +1,60 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Fast checks that run on GitHub-hosted runners.
+  tor-core-and-hooks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tor_core
+      - name: Tor core tests
+        run: cargo test --manifest-path tor_core/Cargo.toml
+      - name: Hook patcher tests
+        run: python3 scripts/tests/test_hooks.py
+
+  # Chromium builds need ~120 GB disk and hours of CPU, far beyond hosted
+  # runners. Register your own machines with these labels:
+  #   [self-hosted, linux, chromium]   Linux x64, 16+ cores, 32+ GB RAM
+  #   [self-hosted, windows, chromium] Windows x64 with VS 2022 + SDK
+  # The checkout under --work is kept between runs, so later builds are
+  # incremental.
+  android:
+    needs: tor-core-and-hooks
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, linux, chromium]
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bootstrap / sync Chromium
+        run: python3 scripts/bootstrap.py --target android --work "$HOME/umbra-build" --skip-deps
+      - name: Build APK
+        run: python3 scripts/build.py --target android --cpu arm64 --work "$HOME/umbra-build"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: umbra-android-arm64
+          path: dist/*.apk
+
+  windows:
+    needs: tor-core-and-hooks
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, windows, chromium]
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bootstrap / sync Chromium
+        run: python scripts\bootstrap.py --target win --work C:\umbra
+      - name: Build
+        run: python scripts\build.py --target win --cpu x64 --work C:\umbra --installer
+      - uses: actions/upload-artifact@v4
+        with:
+          name: umbra-win-x64
+          path: dist/*.exe

@@ -1,0 +1,22 @@
+# Copyright 2026 The Umbra Authors.
+
+source_set("renderer") {
+  sources = [
+    "preload_injector.cc",
+    "preload_injector.h",
+    "preload_script.h",
+  ]
+
+  # Uses chrome/common/chrome_isolated_world_ids.h (header-only enum), which
+  # chrome/renderer already depends on. Not declaring the owning target keeps
+  # //umbra free of chrome/ build deps, so skip `gn check` for this target.
+  check_includes = false
+
+  deps = [
+    "//base",
+    "//content/public/renderer",
+    "//third_party/blink/public:blink",
+    "//umbra/common",
+    "//url",
+  ]
+}

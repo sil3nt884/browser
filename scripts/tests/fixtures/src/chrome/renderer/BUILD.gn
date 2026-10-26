@@ -1,0 +1,7 @@
+static_library("renderer") {
+  sources = [ "chrome_content_renderer_client.cc" ]
+  public_deps = [ "//base" ]
+  deps = [
+    "//chrome/common",
+  ]
+}

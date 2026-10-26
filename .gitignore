@@ -1,0 +1,6 @@
+/tor_core/target/
+/prebuilt/*/
+!/prebuilt/README.md
+/dist/
+__pycache__/
+*.pyc

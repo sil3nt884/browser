@@ -1,0 +1,6 @@
+# Android (built on Linux). Output: out/.../apks/ChromePublic.apk
+target_os = "android"
+
+# Optional: your own package name so it installs next to other Chromium builds.
+# Check the arg still exists in your Chromium version before enabling it.
+# chrome_public_manifest_package = "org.umbra.browser"

@@ -1,0 +1,16 @@
+import("//build/config/features.gni")
+
+static_library("browser") {
+  sources = [
+    "about_flags.cc",
+  ]
+
+  deps = [
+    ":active_use_util",
+    "//base",
+  ]
+}
+
+source_set("other") {
+  deps = [ "//base" ]
+}

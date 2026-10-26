@@ -1,0 +1,47 @@
+# Copyright 2026 The Umbra Authors.
+#
+# The Rust crate in this directory is built with cargo by
+# scripts/build_tor_core.py (it pulls in Arti and ~300 crates that are not part
+# of Chromium's vendored Rust tree). The result is a self-contained shared
+# library that the browser loads at runtime, so its Rust std never meets the
+# one Chromium links. These targets only package that prebuilt file.
+
+if (is_android) {
+  import("//build/config/android/rules.gni")
+}
+
+umbra_tor_prebuilt_dir = "//umbra/prebuilt/$target_os/$target_cpu"
+
+source_set("headers") {
+  sources = [ "include/umbra_tor.h" ]
+}
+
+if (is_win) {
+  copy("runtime") {
+    sources = [ "$umbra_tor_prebuilt_dir/umbra_tor.dll" ]
+    outputs = [ "$root_out_dir/umbra_tor.dll" ]
+  }
+} else if (is_android) {
+  # Packaged as an uncompressed asset; umbra/app/tor_library.cc extracts it
+  # into the app's private data dir on first launch and loads it.
+  android_assets("runtime_assets") {
+    renaming_sources = [ "$umbra_tor_prebuilt_dir/libumbra_tor.so" ]
+    renaming_destinations = [ "umbra/libumbra_tor.so" ]
+    disable_compression = true
+  }
+
+  # Nothing to link on the C++ side; the asset is pulled in through
+  # chrome_java (see scripts/hooks.py, hook "android-assets").
+  group("runtime") {
+  }
+} else {
+  copy("runtime") {
+    if (is_mac) {
+      sources = [ "$umbra_tor_prebuilt_dir/libumbra_tor.dylib" ]
+      outputs = [ "$root_out_dir/libumbra_tor.dylib" ]
+    } else {
+      sources = [ "$umbra_tor_prebuilt_dir/libumbra_tor.so" ]
+      outputs = [ "$root_out_dir/libumbra_tor.so" ]
+    }
+  }
+}
