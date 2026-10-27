@@ -61,6 +61,8 @@ pub struct Video {
   pub hwnd: isize,
   stop: Arc<AtomicBool>,
   key: Arc<AtomicBool>,
+  /// Bits per second the network can take right now (0: settings.bitrate).
+  rate: Arc<AtomicU32>,
   thread: Option<JoinHandle<()>>,
 }
 
@@ -69,6 +71,12 @@ impl Video {
   /// from it).
   pub fn request_key(&self) {
     self.key.store(true, Ordering::Relaxed);
+  }
+
+  /// Follows the network: encode at up to `bps`, never above the phone's
+  /// quality preset (settings.bitrate) and not below 1 Mbit/s.
+  pub fn set_bitrate(&self, bps: u32) {
+    self.rate.store(bps.clamp(1_000_000, self.settings.bitrate.max(1_000_000)), Ordering::Relaxed);
   }
 }
 
@@ -92,9 +100,10 @@ pub fn start(
 ) -> std::result::Result<Video, String> {
   let stop = Arc::new(AtomicBool::new(false));
   let key = Arc::new(AtomicBool::new(false));
+  let rate = Arc::new(AtomicU32::new(0));
   let (ready_tx, ready_rx) = std::sync::mpsc::channel();
   let thread = {
-    let (stop, key) = (stop.clone(), key.clone());
+    let (stop, key, rate) = (stop.clone(), key.clone(), rate.clone());
     std::thread::Builder::new()
       .name("video".into())
       .spawn(move || {
@@ -108,7 +117,7 @@ pub fn start(
             return;
           }
         };
-        if let Err(e) = pipe.run(&stop, &key, &out, &in_flight) {
+        if let Err(e) = pipe.run(&stop, &key, &rate, &out, &in_flight) {
           log!("video stopped: {e}");
         }
       })
@@ -117,7 +126,7 @@ pub fn start(
   match ready_rx.recv_timeout(Duration::from_secs(10)) {
     Ok(Ok(name)) => {
       log!("video: {}x{} at {} kbit/s on {name}", settings.width, settings.height, settings.bitrate / 1000);
-      Ok(Video { settings, hwnd, stop, key, thread: Some(thread) })
+      Ok(Video { settings, hwnd, stop, key, rate, thread: Some(thread) })
     }
     Ok(Err(e)) => Err(e),
     Err(_) => {
@@ -153,10 +162,15 @@ impl Pipeline {
     &mut self,
     stop: &AtomicBool,
     key: &AtomicBool,
+    rate: &AtomicU32,
     out: &dyn Fn(Vec<u8>),
     in_flight: &AtomicU32,
   ) -> Result<()> {
     let start = Instant::now();
+    let mut bitrate = self.settings.bitrate;
+    // Frames lost on the way are acked by the phone (umbranet reports them),
+    // so this is only a safety net: never wait on missing acks forever.
+    let mut full_since: Option<Instant> = None;
     let frame_time = Duration::from_secs(1) / self.settings.fps;
     let mut origin = (0, 0);
     let mut origin_at: Option<Instant> = None;
@@ -192,6 +206,24 @@ impl Pipeline {
         let tex: ID3D11Texture2D = unsafe { frame.Surface()?.cast::<IDirect3DDxgiInterfaceAccess>()?.GetInterface()? };
         fresh = Some(self.convert.run(&self.ctx, &tex, origin, self.capture.size)?);
         let _ = frame.Close();
+      }
+      let want = match rate.load(Ordering::Relaxed) {
+        0 => self.settings.bitrate,
+        r => r,
+      };
+      if want.abs_diff(bitrate) > bitrate / 20 {
+        self.encoder.set_bitrate(want);
+        bitrate = want;
+      }
+      if in_flight.load(Ordering::Relaxed) >= FRAMES_IN_FLIGHT {
+        let since = *full_since.get_or_insert_with(Instant::now);
+        if since.elapsed() > Duration::from_secs(1) {
+          in_flight.store(0, Ordering::Relaxed);
+          key.store(true, Ordering::Relaxed);
+          full_since = None;
+        }
+      } else {
+        full_since = None;
       }
       let want_key = key.load(Ordering::Relaxed);
       if self.encoder.need > 0 && in_flight.load(Ordering::Relaxed) < FRAMES_IN_FLIGHT {
@@ -521,6 +553,15 @@ impl Encoder {
     if let Some(c) = &self.codec {
       unsafe {
         let _ = c.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32));
+      }
+    }
+  }
+
+  /// Changes the bit rate mid-stream (the next frames follow it).
+  fn set_bitrate(&self, bps: u32) {
+    if let Some(c) = &self.codec {
+      unsafe {
+        let _ = c.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bps));
       }
     }
   }

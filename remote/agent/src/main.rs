@@ -11,6 +11,7 @@ mod audio;
 mod browser;
 mod cdp;
 mod hub;
+mod net;
 mod server;
 mod tray;
 mod video;
@@ -95,6 +96,10 @@ fn main() {
   if raw.get(1).map(String::as_str) == Some("--video-test") && raw.len() == 5 {
     return video_test(&raw[2], raw[3].parse().unwrap_or(5), &raw[4]);
   }
+  if raw.get(1).map(String::as_str) == Some("--udp-test") && raw.len() >= 4 {
+    let drop = raw.get(4).and_then(|d| d.parse().ok()).unwrap_or(0);
+    return net::phone_test(&raw[2], raw[3].parse().unwrap_or(5), drop);
+  }
   let args = parse_args();
   log!("starting; chrome = {}", args.chrome.display());
   // After a restart from the phone the old agent may still hold the port
@@ -126,6 +131,8 @@ fn main() {
   let (client_tx, client_rx) = tokio::sync::mpsc::unbounded_channel();
   let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
   let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
+
+  net::serve(args.port, client_tx.clone());
 
   let st = status.clone();
   let main_thread = tray::current_thread();
@@ -195,10 +202,19 @@ fn video_test(chrome: &str, secs: u64, out: &str) {
   };
   let t = Instant::now();
   let (mut n, mut bytes, mut keys, mut stream) = (0, 0, 0, Vec::new());
+  // The second half runs at a quarter of the bit rate, as if the network
+  // asked for less (net.rs).
+  let mut halves = [0usize; 2];
+  let mut lowered = false;
   while t.elapsed() < Duration::from_secs(secs) {
+    if !lowered && t.elapsed() > Duration::from_secs(secs) / 2 {
+      v.set_bitrate(s.bitrate / 4);
+      lowered = true;
+    }
     while let Ok(au) = rx.try_recv() {
       n += 1;
       bytes += au.len();
+      halves[lowered as usize] += au.len();
       if au.windows(4).any(|w| w[..3] == [0, 0, 1] && w[3] & 0x1f == 5) {
         keys += 1;
       }
@@ -214,4 +230,10 @@ fn video_test(chrome: &str, secs: u64, out: &str) {
   let _ = child.kill();
   let _ = std::fs::write(out, &stream);
   log!("video-test: {n} frames ({:.1} fps), {:.2} Mbit/s, {keys} keyframes", n as f64 / secs as f64, bytes as f64 * 8.0 / secs as f64 / 1e6);
+  let half = secs as f64 / 2.0;
+  log!(
+    "video-test: bit rate {:.2} Mbit/s, then {:.2} Mbit/s after asking for a quarter",
+    halves[0] as f64 * 8.0 / half / 1e6,
+    halves[1] as f64 * 8.0 / half / 1e6
+  );
 }

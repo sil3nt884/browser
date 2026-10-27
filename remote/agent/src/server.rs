@@ -1,7 +1,8 @@
 // Copyright 2026 The Umbra Authors.
 //! The phone-facing server: `GET /` is the viewer page, `GET /ws` the
-//! WebSocket. Only devices on the local network (and this PC) may connect;
-//! DevTools itself never leaves 127.0.0.1.
+//! WebSocket (the app's fallback when UDP, net.rs, is blocked). Only
+//! devices on the local network (and this PC) may connect; DevTools itself
+//! never leaves 127.0.0.1.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +20,11 @@ use crate::log;
 const VIEWER: &str = include_str!("../viewer/index.html");
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A number for a new phone connection (WebSocket or UDP).
+pub fn next_id() -> u64 {
+  NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 pub async fn serve(listener: TcpListener, hub: mpsc::UnboundedSender<ClientMsg>) {
   loop {
@@ -63,7 +69,7 @@ async fn handle(mut sock: TcpStream, peer: SocketAddr, hub: mpsc::UnboundedSende
 
   if path.starts_with("/ws") && upgrade {
     let Ok(ws) = tokio_tungstenite::accept_async(sock).await else { return };
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let id = next_id();
     let (mut sink, mut stream) = ws.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     let _ = hub.send(ClientMsg::Open(id, peer.ip().to_string(), tx));

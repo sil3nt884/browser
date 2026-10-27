@@ -473,6 +473,13 @@ public final class MainActivity extends Activity
         audio.write(data, offset, length);
     }
 
+    /** Network thread: a picture was lost on the way (UDP). */
+    @Override
+    public void onLost() {
+        conn.send("ack");
+        video.lost();
+    }
+
     @Override
     public void onJson(JSONObject m) {
         switch (m.optString("t")) {

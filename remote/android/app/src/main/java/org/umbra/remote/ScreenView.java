@@ -174,6 +174,11 @@ public final class ScreenView extends View {
         String kind;
         switch (action) {
             case MotionEvent.ACTION_DOWN:
+                // Android normally batches touch moves until the next screen
+                // refresh; for this gesture, hand each one over as it's read.
+                requestUnbufferedDispatch(e);
+                kind = "start";
+                break;
             case MotionEvent.ACTION_POINTER_DOWN:
                 kind = "start";
                 break;

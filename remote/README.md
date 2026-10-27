@@ -6,8 +6,8 @@ typing and navigation back. Sound plays on the phone, not the PC. Pages are
 never loaded on the phone: only video, input and sound cross your Wi-Fi.
 
 ```
- phone (UmbraRemote.apk)  ── Wi-Fi, ws://PC:7777 ──  umbra-remote.exe (tray)
-   hardware H.264 decode,                              │ DevTools (127.0.0.1 only),
+ phone (UmbraRemote.apk)  ── Wi-Fi, UDP 7777 ──────  umbra-remote.exe (tray)
+   hardware H.264 decode,    (ws://PC:7777 fallback)   │ DevTools (127.0.0.1 only),
    touch, keyboard, AudioTrack                         │ window capture + NVENC
                                                        ▼
                                                       Umbra (off-screen) ── Tor ── web
@@ -16,7 +16,8 @@ never loaded on the phone: only video, input and sound cross your Wi-Fi.
 | Part | Where |
 |---|---|
 | PC agent: tray app, browser bridge, phone server | `agent/` (Rust) |
-| Phone app: native Android, no WebView | `android/` (Java) |
+| Phone app: native Android, no WebView | `android/` (Java, JNI) |
+| Network link, shared by both | `net/umbranet.c` (C) |
 | Test viewer (same protocol, in any browser) | `agent/viewer/index.html`, served at `http://PC:7777/` |
 
 The protocol is documented at the top of `agent/src/hub.rs`.
@@ -34,8 +35,10 @@ The protocol is documented at the top of `agent/src/hub.rs`.
    it doesn't ask, run this once in an administrator PowerShell:
    ```powershell
    New-NetFirewallRule -DisplayName "Umbra Remote" -Direction Inbound -Action Allow -Profile Private -Program "C:\UmbraBrowser\umbra-remote.exe" -Protocol TCP -LocalPort 7777
+   New-NetFirewallRule -DisplayName "Umbra Remote (UDP)" -Direction Inbound -Action Allow -Profile Private -Program "C:\UmbraBrowser\umbra-remote.exe" -Protocol UDP -LocalPort 7777
    ```
-   The agent also refuses anything that isn't a local-network address.
+   Without the UDP rule the app still works, over the WebSocket (TCP). The
+   agent also refuses anything that isn't a local-network address.
 3. **Sound on the phone:** install the free
    [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) (run its installer as
    administrator, then reboot). The agent finds it and does the rest. Without
@@ -99,6 +102,44 @@ connects, Umbra restarts once (the page reopens).
 Without a hardware encoder the agent falls back to DevTools' JPEG
 screencast (about 30 fps, softer).
 
+## How it crosses the Wi-Fi
+
+Like Parsec and Moonlight, over UDP rather than TCP, with the network code
+in C (`net/umbranet.c`): linked into the agent, and into the app through
+JNI. One UDP socket each side, three channels:
+
+- **Pictures and sound** go out the moment they're encoded and are never
+  resent. A frame is split into 1200-byte packets; if one is missing the
+  whole frame is dropped and the app asks for a keyframe, so the picture
+  freezes for a frame or two instead of smearing, and a lost packet never
+  holds up the frames behind it (TCP makes everything wait for the resend).
+  No error correction, by choice.
+- **Taps, keys and everything else** (the JSON messages in `hub.rs`) go on a
+  reliable, ordered channel with selective acks: a lost packet is resent
+  within a few milliseconds, not after TCP's 200-300 ms minimum timeout.
+- **Rate control:** the phone reports loss and queueing delay every 100 ms;
+  above 10% loss or 15 ms of queue the agent lowers the encoder's bit rate,
+  under 2% it climbs back to the quality preset. Scattered loss in between
+  is normal on Wi-Fi and left alone.
+
+Packets to the phone are marked as video (DSCP through Windows qWAVE) and the
+phone's as voice, so Wi-Fi access points that honour WMM send them ahead of
+other traffic. Taps are handed over as the touchscreen reads them, not
+batched to the next screen refresh. If the PC doesn't answer on UDP within a
+second, the app uses the WebSocket instead.
+
+Measured on the PC (loopback, so no Wi-Fi in it), with
+`umbra-remote.exe --udp-test 127.0.0.1:7777 5 [loss per 1000]`:
+
+- control message there and back through the agent: 0.3 ms either way
+  (UDP or WebSocket); each network hop of a tap is the same within 0.1 ms,
+  and the rest of tap -> picture (13-22 ms) is Chrome drawing, capture and
+  encode;
+- with 10% of packets dropped each way, every control message still
+  arrives, in order; 95% of round trips within 4 ms;
+- with 5% dropped each way: ~65 fps animation, each lost frame recovered by
+  a keyframe, bit rate held; at 15%, the bit rate comes down.
+
 ## Looking like a phone
 
 Every target Umbra creates (tabs, pop-ups, cross-site iframes, workers and
@@ -138,8 +179,14 @@ output instead of the cable.
 
 - Agent (Windows): `cd agent && cargo build --release` → `target\release\umbra-remote.exe`.
 - APK (WSL or Linux): `android/setup-sdk.sh` once (JDK 21, Android SDK 35,
-  Gradle; no sudo; accepts the Android SDK license), then
-  `android/build-apk.sh` → `dist/UmbraRemote.apk`.
+  the NDK, Gradle; no sudo; accepts the Android SDK license), then
+  `android/build-apk.sh` → `dist/UmbraRemote.apk` (it compiles `net/` for
+  arm64, armv7 and x86_64 with the NDK's clang first).
+- `cargo test` (in `agent/`) runs the link's loss tests;
+  `umbra-remote.exe --udp-test 127.0.0.1:7777 5 [loss per 1000]` plays a
+  phone against the running agent in a tab of its own (closed after) and logs
+  tap -> picture, fps and losses; `ws://127.0.0.1:7777` runs the same over the
+  WebSocket.
 - `umbra-remote.exe --video-test C:\UmbraBrowser\chrome.exe 6 out.h264`
   encodes a test page in a throwaway Umbra window and logs fps and bit rate
   (to `%LOCALAPPDATA%\UmbraRemote\agent.log`).
@@ -147,7 +194,7 @@ output instead of the cable.
   what the PC's speakers are actually getting, handy for checking that Umbra
   is silent on the PC.
 
-## Limits (v0.4)
+## Limits (v0.6)
 
 - One viewer at a time. A second one takes over and the first shows "open on
   another device".
@@ -157,5 +204,5 @@ output instead of the cable.
   colour pickers, autofill) are not in the picture yet.
 - Quality presets set the video bit rate: 5 / 10 / 18 Mbit/s.
 - Deploy a new agent build with `agent/deploy.ps1` (Umbra keeps running).
-- Plain WebSocket on the LAN, no pairing (by choice). Anyone on your Wi-Fi who
-  knows the port can view and drive this browser.
+- Plain UDP and WebSocket on the LAN, no pairing or encryption (by choice).
+  Anyone on your Wi-Fi who knows the port can view and drive this browser.

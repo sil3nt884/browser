@@ -2,7 +2,7 @@
 # Copyright 2026 The Umbra Authors.
 # Installs what the Umbra Remote APK needs to build, without sudo, into
 # $ANDROID_BUILD_HOME (default ~/android-build): a JDK 21, the Android SDK
-# (platform 35, build-tools 35) and Gradle. Running it again skips what's
+# (platform 35, build-tools 35, the NDK for the C network link) and Gradle. Running it again skips what's
 # already there. Then:  ./build-apk.sh
 #
 # Note: this accepts the Android SDK License Agreement.
@@ -39,7 +39,7 @@ SDKM="sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ROOT/sdk"
 
 echo "== Android SDK packages (accepting the SDK license)"
 yes | $SDKM --licenses > /dev/null || true
-$SDKM "platforms;android-35" "build-tools;35.0.0"
+$SDKM "platforms;android-35" "build-tools;35.0.0" "ndk;30.0.16248370"
 
 if [ ! -x gradle/bin/gradle ]; then
   echo "== Gradle $GRADLE_VERSION"

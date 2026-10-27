@@ -56,6 +56,14 @@ WebView, OkHttp WebSocket, AudioTrack), built in WSL via `setup-sdk.sh` /
   on its own thread + low-latency WifiLock. tools/fps_test.py: 31.8 fps at a
   simulated 40 ms phone delay. Screencast frames are at CSS size (headed
   window at 1x), not the emulated DPR.
+- v0.4/v0.5: H.264 window capture, full screen, pull to refresh, tabs (see
+  remote/README.md). v0.6: Parsec-style UDP link in C (`remote/net`,
+  linked into the agent via `build.rs`/cc and into the APK via JNI, built by
+  `build-apk.sh` with the NDK). WebSocket stays as the fallback. Verified on
+  the PC only (`cargo test`, `--udp-test` against the real agent); the APK's
+  UDP path has not run on a phone. Sockets must stay non-inheritable: the
+  agent starts Umbra, which otherwise keeps UDP 7777 after an agent restart.
+  UDP needs its own firewall rule (the user adds it).
 - Auto-mode's safety classifier was flaky ("no verdict"); the user added
   `.claude/settings.local.json` allowing only: cargo build/test of
   remote/agent (with `--manifest-path C:/me-tor/umbra/remote/agent/Cargo.toml`),

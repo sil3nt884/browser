@@ -10,10 +10,15 @@
 //! then resumed, so even a page's first request and its embedded
 //! challenge frames look like the same phone.
 //!
+//! Phones connect over UDP (net.rs: JSON on the reliable channel, pictures
+//! and sound on the unreliable ones) or, as a fallback, the WebSocket
+//! (server.rs: JSON as text, the rest as binary). Same messages either way.
+//!
 //! Phone -> agent (JSON text):
 //!   hello {w, h, sw, sh, dpr, mobile, quality}   viewport and whole screen
 //!                                         in CSS px; resend on resize/rotate
-//!   ack                                   frame shown, send the next one
+//!   ack                                   frame shown (or lost on the way),
+//!                                         send the next one
 //!   idr                                   video decoder needs a keyframe
 //!   touch {k: start|move|end|cancel, p: [[x, y, id], ...], ts}  active
 //!                                         points; ts = phone's event time, ms
@@ -62,6 +67,8 @@ pub enum ClientMsg {
   Open(u64, String, mpsc::UnboundedSender<Message>),
   Text(u64, String),
   Closed(u64),
+  /// The UDP link's suggested bit rate for this phone (net.rs).
+  Rate(u64, u32),
 }
 
 #[derive(Default, Clone)]
@@ -163,6 +170,8 @@ struct Hub {
   /// timestamp given to Chrome.
   touch_clock: Option<f64>,
   last_touch_ts: f64,
+  /// What the UDP link says the network can carry (None: no opinion).
+  net_rate: Option<u32>,
 }
 
 pub async fn run(
@@ -207,6 +216,7 @@ pub async fn run(
     rescaled: false,
     touch_clock: None,
     last_touch_ts: 0.0,
+    net_rate: None,
   };
   let mut start_url = home.clone();
   loop {
@@ -647,6 +657,9 @@ impl Hub {
     });
     match started {
       Ok(v) => {
+        if let Some(bps) = self.net_rate {
+          v.set_bitrate(bps);
+        }
         self.video = Some(v);
         self.video_started(width, height);
         true
@@ -842,6 +855,7 @@ impl Hub {
           let _ = old.tx.send(Message::text(json!({ "t": "bye" }).to_string()));
         }
         self.client = Some(Client { id, tx });
+        self.net_rate = None;
         self.last_vp = (0, 0);
         self.touch_clock = None;
         self.fullscreen.store(false, Ordering::Relaxed);
@@ -867,6 +881,14 @@ impl Hub {
         }
         let Ok(v) = serde_json::from_str::<Value>(&text) else { return };
         self.on_phone(v).await;
+      }
+      ClientMsg::Rate(id, bps) => {
+        if self.client.as_ref().is_some_and(|c| c.id == id) {
+          self.net_rate = Some(bps);
+          if let Some(v) = &self.video {
+            v.set_bitrate(bps);
+          }
+        }
       }
     }
   }

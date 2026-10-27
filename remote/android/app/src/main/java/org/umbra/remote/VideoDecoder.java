@@ -22,8 +22,10 @@ import java.util.concurrent.TimeUnit;
  * Every access unit is acked once, when it goes into the decoder or is
  * dropped, so the agent's count of frames in flight stays right. A decoder
  * starts on a keyframe (SPS + PPS + IDR); until one comes, frames are
- * dropped and one is asked for. Everything runs on one thread, including
- * MediaCodec's callbacks.
+ * dropped and one is asked for. After a frame is lost on the way (UDP), the
+ * frames that build on it are dropped too until the next keyframe, so the
+ * picture freezes for a moment instead of smearing. Everything runs on one
+ * thread, including MediaCodec's callbacks.
  */
 final class VideoDecoder {
     interface Listener {
@@ -44,6 +46,10 @@ final class VideoDecoder {
     private int width, height;
     private MediaCodec codec;
     private boolean shown;
+    /** A frame was lost: wait for a keyframe. */
+    private boolean broken;
+    /** A keyframe that came before its stream's size or surface (not acked yet). */
+    private byte[] heldKey;
     private long askedAt;
 
     VideoDecoder(Listener listener) {
@@ -58,6 +64,17 @@ final class VideoDecoder {
             width = w;
             height = h;
             stop();
+            if (w == 0) dropHeldKey();
+            else playHeldKey();
+        });
+    }
+
+    /** Network thread: a frame never arrived (it was acked already). */
+    void lost() {
+        handler.post(() -> {
+            if (codec == null) return;
+            broken = true;
+            askForKeyframe();
         });
     }
 
@@ -67,7 +84,8 @@ final class VideoDecoder {
         handler.post(() -> {
             surface = s;
             stop();
-            if (s != null) askForKeyframe();
+            if (s != null && heldKey == null) askForKeyframe();
+            playHeldKey();
             done.countDown();
         });
         try {
@@ -92,16 +110,46 @@ final class VideoDecoder {
     // ---- decoder thread -----------------------------------------------------
 
     private void onAccessUnit(byte[] au) {
+        boolean key = isKeyframe(au);
         if (codec == null) {
-            if (width > 0 && surface != null && surface.isValid() && isKeyframe(au)) start(au);
+            boolean ready = width > 0 && surface != null && surface.isValid();
+            if (ready && key) start(au);
             if (codec == null) {
+                if (key && !ready) {
+                    // The stream's size is probably still on its way (it
+                    // comes on another channel): keep this for then.
+                    dropHeldKey();
+                    heldKey = au;
+                    return;
+                }
                 listener.onAck();
                 askForKeyframe();
                 return;
             }
         }
+        if (broken) {
+            if (!key) {
+                listener.onAck();
+                askForKeyframe();
+                return;
+            }
+            broken = false;
+        }
         pending.add(au);
         drain();
+    }
+
+    private void playHeldKey() {
+        byte[] au = heldKey;
+        if (au == null || width == 0 || surface == null || !surface.isValid()) return;
+        heldKey = null;
+        onAccessUnit(au);
+    }
+
+    private void dropHeldKey() {
+        if (heldKey == null) return;
+        heldKey = null;
+        listener.onAck();
     }
 
     private void start(byte[] key) {
@@ -139,6 +187,7 @@ final class VideoDecoder {
             codec.release();
             codec = null;
         }
+        broken = false;
         freeInputs.clear();
         while (!pending.isEmpty()) {
             pending.poll();
@@ -165,8 +214,10 @@ final class VideoDecoder {
     }
 
     private void askForKeyframe() {
+        // About one round trip plus an encode; asking again sooner would
+        // only get two keyframes.
         long now = System.currentTimeMillis();
-        if (now - askedAt < 500) return;
+        if (now - askedAt < 150) return;
         askedAt = now;
         listener.onNeedKeyframe();
     }

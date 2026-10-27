@@ -10,8 +10,16 @@ android {
         applicationId "org.umbra.remote"
         minSdk 26
         targetSdk 35
-        versionCode 5
-        versionName "0.5"
+        versionCode 6
+        versionName "0.6"
+    }
+
+    // libumbranet.so (remote/net + src/main/c), compiled by build-apk.sh
+    // with the NDK's clang.
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ["build/jni"]
+        }
     }
 
     buildTypes {
