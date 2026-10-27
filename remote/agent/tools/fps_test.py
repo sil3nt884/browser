@@ -5,17 +5,26 @@ scrolling the page, acks each frame `delay_ms` after it arrives (to stand in
 for a real phone's Wi-Fi round trip and decode; 0 = best case), and reports
 frames per second, frame size and the gaps between frames.
 
-  python -I remote/agent/tools/fps_test.py [seconds] [quality] [dpr] [delay_ms]
+  python -I remote/agent/tools/fps_test.py [seconds] [quality] [dpr] [delay_ms] [url]
+
+Without a url it opens a long built-in test page (no network needed).
+
+With H.264 video the stream is also written to fps_test.h264 in the temp
+folder (check it with examples/h264_check.rs).
 
 Note it takes over from a connected phone (which then shows "open on another
 device"), and it scrolls whatever page is on screen; use a long one.
 """
-import base64, json, os, socket, struct, sys, time
+import base64, json, os, socket, struct, sys, tempfile, time
 
 secs = float(sys.argv[1]) if len(sys.argv) > 1 else 8
 quality = int(sys.argv[2]) if len(sys.argv) > 2 else 70
 dpr = float(sys.argv[3]) if len(sys.argv) > 3 else 2.625
 ack_delay = (float(sys.argv[4]) if len(sys.argv) > 4 else 0) / 1000
+TEST_PAGE = ("data:text/html,<meta name=viewport content='width=device-width'><body style='font:16px sans-serif'>"
+             "<script>for(let i=0;i<400;i++)document.write('<p>'+i+' The quick brown fox jumps over the lazy dog. "
+             "Pack my box with five dozen liquor jugs.</p>')</script>")
+url = sys.argv[5] if len(sys.argv) > 5 else TEST_PAGE
 
 s = socket.create_connection(("127.0.0.1", 7777))
 s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -37,25 +46,25 @@ def send(obj):
     s.sendall(head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
 
 
-def read_exact(n):
+def frame():
+    """The next WebSocket message as (opcode, payload); waits at most the
+    socket timeout, and leaves a partly received message in `buf`."""
     global buf
-    while len(buf) < n:
+    while True:
+        if len(buf) >= 2:
+            n, head = buf[1] & 0x7F, 2
+            if n == 126 and len(buf) >= 4:
+                n, head = struct.unpack(">H", buf[2:4])[0], 4
+            elif n == 127 and len(buf) >= 10:
+                n, head = struct.unpack(">Q", buf[2:10])[0], 10
+            if n < 126 or head > 2:
+                if len(buf) >= head + n:
+                    op, payload, buf = buf[0] & 0x0F, buf[head:head + n], buf[head + n:]
+                    return op, payload
         chunk = s.recv(1 << 20)
         if not chunk:
             raise EOFError
         buf += chunk
-    out, buf = buf[:n], buf[n:]
-    return out
-
-
-def frame():
-    b0, b1 = read_exact(2)
-    n = b1 & 0x7F
-    if n == 126:
-        n = struct.unpack(">H", read_exact(2))[0]
-    elif n == 127:
-        n = struct.unpack(">Q", read_exact(8))[0]
-    return b0 & 0x0F, read_exact(n)
 
 
 def jpeg_size(j):
@@ -70,9 +79,12 @@ def jpeg_size(j):
 
 
 send({"t": "hello", "w": 412, "h": 860, "sw": 412, "sh": 915, "dpr": dpr, "mobile": True, "quality": quality})
+send({"t": "nav", "url": url})
+time.sleep(1.5)
 s.settimeout(0.005)
 t0 = time.time()
 last_scroll, frames, down, last_t, acks, last_jpeg = 0, [], True, None, [], b""
+video, h264 = None, bytearray()
 while time.time() - t0 < secs:
     now = time.time()
     if now - last_scroll > 0.03:  # keep the page moving, like a finger flicking
@@ -87,17 +99,28 @@ while time.time() - t0 < secs:
         op, payload = frame()
     except socket.timeout:
         continue
-    if op == 2 and payload[:1] == b"\x01":
+    if op == 1:
+        m = json.loads(payload)
+        if m.get("t") == "video":
+            video, h264 = f"{m['w']}x{m['h']} H.264", bytearray()
+    if op == 2 and payload[:1] in (b"", b""):
         t = time.time()
         frames.append((t, len(payload), (t - last_t) if last_t else 0))
         last_t = t
         acks.append(t + ack_delay)
-        last_jpeg = payload[1:]
+        if payload[:1] == b"":
+            last_jpeg = payload[1:]
+        else:
+            h264 += payload[1:]
 
 if frames:
     span = frames[-1][0] - frames[0][0]
     gaps = sorted(g for _, _, g in frames[1:]) or [0]
-    print(f"quality {quality}, dpr {dpr}, phone delay {ack_delay * 1000:.0f} ms: {jpeg_size(last_jpeg)} frames, "
+    if h264:
+        open(os.path.join(tempfile.gettempdir(), "fps_test.h264"), "wb").write(h264)
+    kind = video or f"{jpeg_size(last_jpeg)} JPEG"
+    mbit = sum(n for _, n, _ in frames) * 8 / max(span, 0.01) / 1e6
+    print(f"quality {quality}, dpr {dpr}, phone delay {ack_delay * 1000:.0f} ms: {kind} frames, {mbit:.1f} Mbit/s, "
           f"{len(frames)} in {span:.1f}s = {len(frames) / max(span, 0.01):.1f} fps; "
           f"avg {sum(n for _, n, _ in frames) / len(frames) / 1024:.0f} KB; "
           f"median gap {gaps[len(gaps) // 2] * 1000:.0f} ms, worst {gaps[-1] * 1000:.0f} ms")

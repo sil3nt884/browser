@@ -27,13 +27,17 @@ import java.util.ArrayDeque;
 /**
  * Shows the PC's page and turns touches and typing into the agent's input
  * messages. Coordinates are sent in the page's CSS pixels.
+ *
+ * With video the picture is on a SurfaceView underneath (see VideoDecoder)
+ * and this view only takes input; with the JPEG fallback it draws frames.
  */
 public final class ScreenView extends View {
     interface Host {
         /** A frame was put on screen; the agent may send the next one. */
         void onFrameShown();
         void onSizeChanged(int widthPx, int heightPx);
-        void onTouch(String kind, JSONArray points);
+        /** time: when the phone saw it (uptime ms), for Chrome's fling speed. */
+        void onTouch(String kind, JSONArray points, long time);
         void onText(String text);
         void onKey(String key);
     }
@@ -44,6 +48,8 @@ public final class ScreenView extends View {
     private final ArrayDeque<Bitmap> spare = new ArrayDeque<>();
     private Host host;
     private Bitmap frame;
+    /** The video stream's size in pixels, while it is what's on screen. */
+    private int videoW, videoH;
     /** The page's viewport in CSS px, as the agent reports it. */
     private float pageW, pageH;
     private long lastMove;
@@ -56,6 +62,18 @@ public final class ScreenView extends View {
 
     void setHost(Host host) {
         this.host = host;
+    }
+
+    /** Video on (its size in pixels), or off (0, 0: JPEG frames again). */
+    void setVideoSize(int w, int h) {
+        videoW = w;
+        videoH = h;
+        if (w > 0) frame = null;
+        invalidate();
+    }
+
+    boolean videoMode() {
+        return videoW > 0;
     }
 
     void setPageSize(float w, float h) {
@@ -84,6 +102,7 @@ public final class ScreenView extends View {
 
     /** Main thread. */
     void show(Bitmap b) {
+        if (b != null && videoMode()) setVideoSize(0, 0);
         if (b == null) {
             if (host != null) host.onFrameShown();
             return;
@@ -102,7 +121,7 @@ public final class ScreenView extends View {
     }
 
     boolean hasFrame() {
-        return frame != null;
+        return frame != null || videoMode();
     }
 
     @Override
@@ -120,7 +139,7 @@ public final class ScreenView extends View {
      * phone rotates, the last frame still has the old shape until the PC
      * sends one at the new size, so it is letterboxed instead of stretched.
      */
-    private void fitFrame(int fw, int fh) {
+    void fitFrame(int fw, int fh) {
         int vw = getWidth(), vh = getHeight();
         float frameAspect = (float) fw / Math.max(1, fh), viewAspect = (float) vw / Math.max(1, vh);
         if (Math.abs(frameAspect - viewAspect) < 0.02f * viewAspect) {
@@ -132,6 +151,12 @@ public final class ScreenView extends View {
             int w = Math.round(vh * frameAspect);
             dst.set((vw - w) / 2, 0, (vw + w) / 2, vh);
         }
+    }
+
+    /** Where a picture of this size goes in this view (see fitFrame). */
+    Rect placeFor(int fw, int fh) {
+        fitFrame(fw, fh);
+        return new Rect(dst);
     }
 
     @Override
@@ -164,7 +189,7 @@ public final class ScreenView extends View {
                 kind = "end";
                 break;
             case MotionEvent.ACTION_CANCEL:
-                host.onTouch("cancel", new JSONArray());
+                host.onTouch("cancel", new JSONArray(), e.getEventTime());
                 return true;
             default:
                 return true;
@@ -176,7 +201,8 @@ public final class ScreenView extends View {
         // assume the size we asked for (this view in dp).
         float density = getResources().getDisplayMetrics().density;
         Bitmap b = frame;
-        if (b != null) fitFrame(b.getWidth(), b.getHeight());
+        if (videoMode()) fitFrame(videoW, videoH);
+        else if (b != null) fitFrame(b.getWidth(), b.getHeight());
         else dst.set(0, 0, getWidth(), getHeight());
         float dw = Math.max(1, dst.width()), dh = Math.max(1, dst.height());
         float sx = pageW > 0 ? pageW / dw : 1 / density;
@@ -191,7 +217,7 @@ public final class ScreenView extends View {
             }
         } catch (JSONException ignored) {
         }
-        host.onTouch(kind, points);
+        host.onTouch(kind, points, e.getEventTime());
         return true;
     }
 

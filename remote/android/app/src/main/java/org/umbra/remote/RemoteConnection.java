@@ -18,7 +18,8 @@ import okio.ByteString;
 
 /**
  * The WebSocket to the PC agent (protocol: remote/agent/src/hub.rs).
- * Binary messages start with a kind byte: 1 = JPEG frame, 2 = PCM sound.
+ * Binary messages start with a kind byte: 1 = JPEG frame, 2 = PCM sound,
+ * 3 = H.264 access unit.
  * Frames and sound are delivered on the network thread (to decode/queue off
  * the UI thread); JSON and connection state arrive on the main thread.
  */
@@ -26,6 +27,7 @@ final class RemoteConnection {
     interface Listener {
         void onOpen();
         void onFrame(byte[] data, int offset, int length);
+        void onVideo(byte[] data, int offset, int length);
         void onSound(byte[] data, int offset, int length);
         void onJson(JSONObject message);
         void onClosed(boolean replaced);
@@ -38,7 +40,7 @@ final class RemoteConnection {
 
     private final Listener listener;
     private final Handler main = new Handler(Looper.getMainLooper());
-    private WebSocket socket;
+    private volatile WebSocket socket;
     private boolean replaced;
 
     RemoteConnection(Listener listener) {
@@ -61,6 +63,7 @@ final class RemoteConnection {
                 byte[] b = bytes.toByteArray();
                 if (b[0] == 1) listener.onFrame(b, 1, b.length - 1);
                 else if (b[0] == 2) listener.onSound(b, 1, b.length - 1);
+                else if (b[0] == 3) listener.onVideo(b, 1, b.length - 1);
             }
 
             @Override

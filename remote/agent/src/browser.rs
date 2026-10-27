@@ -55,10 +55,33 @@ fn chrome_major(chrome: &Path) -> String {
     .unwrap_or_else(|| "157".into())
 }
 
-pub async fn launch(chrome: &Path, home: &str) -> Result<(Child, String), String> {
+/// The pixel density Umbra was started with (see `launch`); 1 for a
+/// browser that predates it.
+pub fn running_scale() -> f64 {
+  read_number("scale").unwrap_or(1.0)
+}
+
+/// The last phone's pixel density, to start the next browser with.
+pub fn phone_dpr() -> Option<f64> {
+  read_number("phone-dpr")
+}
+
+pub fn save_phone_dpr(dpr: f64) {
+  let _ = std::fs::write(data_dir().join("phone-dpr"), dpr.to_string());
+}
+
+fn read_number(name: &str) -> Option<f64> {
+  std::fs::read_to_string(data_dir().join(name)).ok()?.trim().parse().ok().filter(|v: &f64| *v >= 1.0 && *v <= 4.0)
+}
+
+/// Starts Umbra at `scale` physical pixels per CSS pixel (the phone's
+/// density), so the window the agent captures already holds the page at
+/// the phone's own resolution.
+pub async fn launch(chrome: &Path, home: &str, scale: f64) -> Result<(Child, String), String> {
   let profile = profile_dir();
   std::fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
   let _ = std::fs::remove_file(profile.join("DevToolsActivePort"));
+  let _ = std::fs::write(data_dir().join("scale"), scale.to_string());
   let child = Command::new(chrome)
     .arg(format!("--user-data-dir={}", profile.display()))
     .arg("--remote-debugging-port=0")
@@ -71,7 +94,9 @@ pub async fn launch(chrome: &Path, home: &str) -> Result<(Child, String), String
     .arg("--disable-backgrounding-occluded-windows")
     .arg("--disable-renderer-backgrounding")
     .arg("--disable-background-timer-throttling")
-    .arg("--window-size=600,1100")
+    // Off-screen from the first frame; the agent sizes it to the phone.
+    .arg("--window-position=-32000,-32000")
+    .arg(format!("--force-device-scale-factor={scale}"))
     // Base layer for "every request looks like a phone": the agent also
     // overrides each target (with matching client hints) as it attaches,
     // but this covers anything that runs before or outside of that.
@@ -80,6 +105,7 @@ pub async fn launch(chrome: &Path, home: &str) -> Result<(Child, String), String
     // ("controlled by automation software"). A person is driving this
     // browser from their phone, so report what a normal browser does.
     .arg("--disable-blink-features=AutomationControlled")
+    .arg("--pull-to-refresh=1")
     .arg(home)
     .stdin(Stdio::null())
     .stdout(Stdio::null())

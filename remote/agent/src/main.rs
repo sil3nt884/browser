@@ -13,6 +13,8 @@ mod cdp;
 mod hub;
 mod server;
 mod tray;
+mod video;
+mod window;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -90,6 +92,9 @@ fn main() {
   if raw.get(1).map(String::as_str) == Some("--route-test") && raw.len() == 4 {
     return audio::route_test(raw[2].parse().unwrap_or(0), &raw[3]);
   }
+  if raw.get(1).map(String::as_str) == Some("--video-test") && raw.len() == 5 {
+    return video_test(&raw[2], raw[3].parse().unwrap_or(5), &raw[4]);
+  }
   let args = parse_args();
   log!("starting; chrome = {}", args.chrome.display());
   // After a restart from the phone the old agent may still hold the port
@@ -150,4 +155,63 @@ fn main() {
     }
   }
   log!("bye");
+}
+
+/// Encodes a test page in a throwaway Umbra window for a few seconds and
+/// writes the raw H.264 stream (kind bytes stripped) to `out`.
+fn video_test(chrome: &str, secs: u64, out: &str) {
+  use std::time::{Duration, Instant};
+  let profile = std::env::temp_dir().join("umbra-video-test");
+  let page = "data:text/html,<body style='margin:0;font:28px sans-serif'><div id=d></div>    <div style='font:14px serif'>The quick brown fox jumps over the lazy dog 0123456789</div>    <div id=b style='position:absolute;top:300px;width:80px;height:80px;background:%23e33'></div>    <script>let n=0;(function f(){n++;d.textContent=n+' dpr='+devicePixelRatio+' '+innerWidth+'x'+innerHeight;    b.style.left=(n*4%300)+'px';requestAnimationFrame(f)})()</script>";
+  let mut child = std::process::Command::new(chrome)
+    .arg(format!("--user-data-dir={}", profile.display()))
+    .args(["--no-first-run", "--disable-features=CalculateNativeWinOcclusion", "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding", "--window-position=-32000,-32000", "--force-device-scale-factor=2.625"])
+    .arg(page)
+    .spawn()
+    .expect("chrome");
+  let mut hwnd = None;
+  for _ in 0..100 {
+    std::thread::sleep(Duration::from_millis(100));
+    hwnd = window::browser_windows(child.id()).first().copied();
+    if hwnd.is_some() {
+      break;
+    }
+  }
+  let Some(hwnd) = hwnd else { return log!("video-test: no window") };
+  std::thread::sleep(Duration::from_secs(2));
+  window::place(hwnd, -32000, -32000, 1200, 2700);
+  std::thread::sleep(Duration::from_millis(500));
+  log!("video-test: window {:?} page at {:?}", window::rect(hwnd), window::page_origin(hwnd));
+  let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+  let in_flight = Arc::new(std::sync::atomic::AtomicU32::new(0));
+  let s = video::Settings { width: 1082, height: 2048, bitrate: 12_000_000, fps: 60, place: (-32000, -32000, 1200, 2700) };
+  let v = match video::start(hwnd, s, move |au| { let _ = tx.send(au); }, in_flight.clone()) {
+    Ok(v) => v,
+    Err(e) => {
+      let _ = child.kill();
+      return log!("video-test: {e}");
+    }
+  };
+  let t = Instant::now();
+  let (mut n, mut bytes, mut keys, mut stream) = (0, 0, 0, Vec::new());
+  while t.elapsed() < Duration::from_secs(secs) {
+    while let Ok(au) = rx.try_recv() {
+      n += 1;
+      bytes += au.len();
+      if au.windows(4).any(|w| w[..3] == [0, 0, 1] && w[3] & 0x1f == 5) {
+        keys += 1;
+      }
+      stream.extend_from_slice(&au[1..]);
+      in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed); // the "phone" acks at once
+    }
+    if n == 120 {
+      v.request_key();
+    }
+    std::thread::sleep(Duration::from_millis(2));
+  }
+  drop(v);
+  let _ = child.kill();
+  let _ = std::fs::write(out, &stream);
+  log!("video-test: {n} frames ({:.1} fps), {:.2} Mbit/s, {keys} keyframes", n as f64 / secs as f64, bytes as f64 * 8.0 / secs as f64 / 1e6);
 }

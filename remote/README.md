@@ -3,12 +3,13 @@
 Use the Umbra on your PC from your Android phone. The PC runs Umbra (and so
 Tor) off-screen; the phone app shows it at the phone's size and sends touches,
 typing and navigation back. Sound plays on the phone, not the PC. Pages are
-never loaded on the phone: only pixels, input and sound cross your Wi-Fi.
+never loaded on the phone: only video, input and sound cross your Wi-Fi.
 
 ```
  phone (UmbraRemote.apk)  ── Wi-Fi, ws://PC:7777 ──  umbra-remote.exe (tray)
-   native view, touch,                                 │ DevTools (127.0.0.1 only)
-   keyboard, AudioTrack                                ▼
+   hardware H.264 decode,                              │ DevTools (127.0.0.1 only),
+   touch, keyboard, AudioTrack                         │ window capture + NVENC
+                                                       ▼
                                                       Umbra (off-screen) ── Tor ── web
 ```
 
@@ -54,6 +55,49 @@ The protocol is documented at the top of `agent/src/hub.rs`.
   Change PC address.
 - Tapping a text field on the page brings up the keyboard; the back button
   goes back (or closes a tab a link opened).
+- **Pull down** at the top of a page to reload it (Chrome's own
+  pull-to-refresh, switched on with `--pull-to-refresh=1`).
+- **Tabs:** the square with a number opens the tab list (tap one to switch,
+  X to close, New tab). New tab is also in the menu. DevTools can't open tabs
+  in Umbra's always-private profile, so the page on screen opens it with
+  `window.open` from an isolated world, as a user gesture.
+
+- When a page goes full screen (a video, a game) the app hides its toolbar
+  and the system bars for as long; Back leaves full screen.
+
+## How the picture gets to the phone
+
+Umbra runs at the phone's own pixel density (e.g. 2.625x), in a window sized
+to the phone's screen, parked off-screen and invisible. Windows Graphics
+Capture takes each frame Chrome composites (at the monitor's refresh rate);
+the agent crops it to the page, converts it to NV12 and encodes it with the
+graphics card's H.264 encoder (NVENC, AMF or Quick Sync through Media
+Foundation; low-latency, constant bit rate, Baseline, no B-frames). The
+phone decodes it with its hardware decoder straight onto a SurfaceView. So:
+
+- the page is pixel for pixel at the phone's resolution (sharp text);
+- up to 60+ fps, ~1-10 Mbit/s, and a frame is never waited on: at most 4
+  are in flight, past that new pictures wait on the GPU, not in the Wi-Fi;
+- after the page settles, the last picture is re-encoded a few times, so
+  what a fast scroll blurred sharpens within a fraction of a second;
+- touches carry the phone's own timestamps, so flings have the speed of the
+  finger, not of the Wi-Fi.
+
+Measured on the PC (RTX 3060), tap to encoded frame: 16 ms median.
+`python -I agent/tools/fps_test.py 8 70 2.625 30` simulates a phone (frames,
+fps, Mbit/s) and saves the stream; `cargo run --release --example h264_check
+-- %TEMP%\fps_test.h264 100 out.bmp` decodes a frame of it.
+
+Windows normally caps a window at the monitor's size; the agent resizes
+without the message that applies the cap, so the window can be as tall as a
+phone at full density. When a page goes full screen Chrome stretches the
+window over the monitor, so the window is kept transparent and click-through
+(capture still sees it) and is put straight back. The phone's density is
+fixed when Umbra starts, so the first time a phone with a different density
+connects, Umbra restarts once (the page reopens).
+
+Without a hardware encoder the agent falls back to DevTools' JPEG
+screencast (about 30 fps, softer).
 
 ## Looking like a phone
 
@@ -96,25 +140,22 @@ output instead of the cable.
 - APK (WSL or Linux): `android/setup-sdk.sh` once (JDK 21, Android SDK 35,
   Gradle; no sudo; accepts the Android SDK license), then
   `android/build-apk.sh` → `dist/UmbraRemote.apk`.
+- `umbra-remote.exe --video-test C:\UmbraBrowser\chrome.exe 6 out.h264`
+  encodes a test page in a throwaway Umbra window and logs fps and bit rate
+  (to `%LOCALAPPDATA%\UmbraRemote\agent.log`).
 - `cargo run --example levels` (in `agent/`) prints the mixer sessions and
   what the PC's speakers are actually getting, handy for checking that Umbra
   is silent on the PC.
 
-## Limits (v0.1)
+## Limits (v0.4)
 
 - One viewer at a time. A second one takes over and the first shows "open on
   another device".
 - Streaming pauses when the app is in the background (no background audio
   yet).
-- Picture is a JPEG stream (DevTools screencast), about 30 fps while
-  scrolling. Up to 3 frames are in flight, the phone decodes off its network
-  thread and holds a low-latency Wi-Fi lock. Measure with
-  `python -I agent/tools/fps_test.py 8 70 2.625 40` (last number = simulated
-  phone delay in ms): 31.8 fps at 40 ms, 19 fps at 80 ms.
-- Frames come at the page's CSS size (412 px wide on a typical phone),
-  because Chrome captures the off-screen window at the PC monitor's density
-  (1x), so text is a little soft on the phone. Quality presets change JPEG
-  compression only.
+- Pop-ups Chrome draws as separate windows (`<select>` lists, date and
+  colour pickers, autofill) are not in the picture yet.
+- Quality presets set the video bit rate: 5 / 10 / 18 Mbit/s.
 - Deploy a new agent build with `agent/deploy.ps1` (Umbra keeps running).
 - Plain WebSocket on the LAN, no pairing (by choice). Anyone on your Wi-Fi who
   knows the port can view and drive this browser.

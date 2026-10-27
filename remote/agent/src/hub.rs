@@ -1,6 +1,8 @@
 // Copyright 2026 The Umbra Authors.
-//! The bridge: one phone at a time, one page on screen. Frames come from
-//! `Page.startScreencast`; taps, scrolls and typing go back as `Input.*`.
+//! The bridge: one phone at a time, one page on screen. The picture is
+//! H.264 video of Umbra's window (video.rs), or DevTools' JPEG screencast
+//! where there's no hardware encoder; taps, scrolls and typing go back as
+//! `Input.*`.
 //!
 //! Every target Umbra creates (tabs, pop-ups, cross-site iframes, workers,
 //! service workers) is auto-attached while paused, given the phone's
@@ -11,20 +13,30 @@
 //! Phone -> agent (JSON text):
 //!   hello {w, h, sw, sh, dpr, mobile, quality}   viewport and whole screen
 //!                                         in CSS px; resend on resize/rotate
-//!   ack                                   frame drawn, send the next one
-//!   touch {k: start|move|end|cancel, p: [[x, y, id], ...]}  active points
+//!   ack                                   frame shown, send the next one
+//!   idr                                   video decoder needs a keyframe
+//!   touch {k: start|move|end|cancel, p: [[x, y, id], ...], ts}  active
+//!                                         points; ts = phone's event time, ms
 //!   wheel {x, y, dx, dy}   text {s}   key {key}   nav {url}
-//!   back | fwd | reload    dialog {accept, text}
+//!   back | fwd | reload    dialog {accept, text}    exit_fullscreen
+//!   tabs                   send the tab list   new_tab {url?}
+//!   switch_tab {id}        close_tab {id}
 //!   new_identity           restart Umbra (new Tor circuits), reopen the page
 //!   restart_agent          restart this agent (Umbra keeps running)
 //! Agent -> phone: binary, first byte = kind: 1 = one JPEG frame,
-//!   2 = 20 ms of sound (48 kHz stereo s16le). JSON text =
+//!   2 = 20 ms of sound (48 kHz stereo s16le), 3 = one H.264 access unit
+//!   (Annex B; keyframes carry SPS/PPS). JSON text =
 //!   audio {rate, ch, state}  meta {url, title}  load {on}  vp {w, h}  kbd {on}
+//!   video {w, h}   a new video stream of this size (px) follows
+//!   fullscreen {on}  the page entered or left full screen
+//!   tabs {current, list: [{id, title, url}, ...]}  oldest first; sent when
+//!                    tabs come, go or change, and when asked
 //!   dialog {type, message, value}
 //!   bye (another device took over; don't reconnect on your own)
 
 use std::collections::HashMap;
 use std::process::Child;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -37,6 +49,8 @@ use crate::audio;
 use crate::browser;
 use crate::cdp::Cdp;
 use crate::log;
+use crate::video;
+use crate::window;
 
 pub enum Cmd {
   ShowWindow(bool),
@@ -101,8 +115,13 @@ struct Hub {
   session: Option<String>,
   /// Every attached target: target id -> (session id, target type).
   sessions: HashMap<String, (String, String)>,
-  /// Open tabs, oldest first, with the tab that opened each one.
+  /// Open tabs, oldest first, with the tab that opened each one, and each
+  /// one's (title, url).
   pages: Vec<(String, Option<String>)>,
+  tab_info: HashMap<String, (String, String)>,
+  /// Show the next tab that opens (the phone asked for a new tab).
+  open_next: bool,
+  home: String,
   client: Option<Client>,
   /// The phone's screen (or DEFAULT_VIEW), applied to every tab.
   view: View,
@@ -119,6 +138,31 @@ struct Hub {
   exit: Option<Exit>,
   status: SharedStatus,
   audio_device: Option<String>,
+  /// Umbra's browser process, and the physical pixels per CSS pixel it
+  /// was started with (`browser::launch`).
+  pid: Option<u32>,
+  scale: f64,
+  /// The window of the tab on screen, and where it belongs (x, y, w, h).
+  hwnd: Option<isize>,
+  place: (i32, i32, i32, i32),
+  /// Whether the page on screen is full screen, as last told to the phone
+  /// (shared with the check that runs after taps).
+  fullscreen: Arc<std::sync::atomic::AtomicBool>,
+  /// The video stream, while a phone watches (None: JPEG screencast).
+  video: Option<video::Video>,
+  /// Each stream's frames carry its number; frames of a stopped one that
+  /// are still queued are dropped.
+  video_gen: u64,
+  video_tx: Option<mpsc::UnboundedSender<(u64, Vec<u8>)>>,
+  video_in_flight: Arc<AtomicU32>,
+  /// No hardware encoder or capture: don't try again until restarted.
+  video_broken: bool,
+  /// Restarted Umbra once to match the phone's density (don't loop).
+  rescaled: bool,
+  /// Phone event time -> epoch seconds (smallest delay seen), and the last
+  /// timestamp given to Chrome.
+  touch_clock: Option<f64>,
+  last_touch_ts: f64,
 }
 
 pub async fn run(
@@ -135,6 +179,9 @@ pub async fn run(
     session: None,
     sessions: HashMap::new(),
     pages: vec![],
+    tab_info: HashMap::new(),
+    open_next: false,
+    home: home.clone(),
     client: None,
     view: DEFAULT_VIEW,
     phone_view: false,
@@ -147,6 +194,19 @@ pub async fn run(
     exit: None,
     status,
     audio_device,
+    pid: None,
+    scale: 1.0,
+    hwnd: None,
+    place: (0, 0, 0, 0),
+    fullscreen: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    video: None,
+    video_gen: 0,
+    video_tx: None,
+    video_in_flight: Arc::new(AtomicU32::new(0)),
+    video_broken: false,
+    rescaled: false,
+    touch_clock: None,
+    last_touch_ts: 0.0,
   };
   let mut start_url = home.clone();
   loop {
@@ -157,11 +217,14 @@ pub async fn run(
       conn = Cdp::connect(&url).await.ok();
       if conn.is_some() {
         log!("reusing the running Umbra");
+        hub.scale = browser::running_scale();
       }
     }
     if conn.is_none() {
-      match browser::launch(&chrome, &start_url).await {
+      let scale = browser::phone_dpr().unwrap_or(DEFAULT_VIEW.dpr);
+      match browser::launch(&chrome, &start_url, scale).await {
         Ok((c, url)) => {
+          hub.scale = scale;
           child = Some(c);
           conn = Cdp::connect(&url).await.map_err(|e| log!("devtools: {e}")).ok();
         }
@@ -178,6 +241,8 @@ pub async fn run(
     hub.set_browser("running");
     let exit = hub.serve(cdp.clone(), events, &mut clients, &mut cmds).await;
     hub.cdp = None;
+    hub.video = None;
+    hub.hwnd = None;
     match exit {
       Exit::Gone => {
         log!("Umbra exited; restarting it");
@@ -195,7 +260,7 @@ pub async fn run(
           return Ended::Quit;
         }
         // New Tor circuits come with the new browser; carry on where we were.
-        log!("restarting Umbra for a new Tor identity");
+        log!("restarting Umbra");
         start_url = if hub.last_url.starts_with("http") { hub.last_url.clone() } else { home.clone() };
       }
     }
@@ -263,6 +328,7 @@ impl Hub {
     self.session = None;
     self.sessions.clear();
     self.pages.clear();
+    self.tab_info.clear();
     self.pending_ack = None;
     self.in_flight = 0;
     self.exit = None;
@@ -273,17 +339,22 @@ impl Hub {
     }
     // Sound: capture Umbra's process tree for the phone, keep it off the PC.
     let (pcm_tx, mut pcm_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let _capture = match cdp.call("SystemInfo.getProcessInfo", json!({}), None).await {
+    self.pid = match cdp.call("SystemInfo.getProcessInfo", json!({}), None).await {
       Ok(info) => info["processInfo"]
         .as_array()
         .and_then(|a| a.iter().find(|p| p["type"] == "browser"))
         .and_then(|p| p["id"].as_u64())
-        .map(|pid| audio::start(pid as u32, pcm_tx, self.status.lock().unwrap().sound.clone(), self.audio_device.clone())),
+        .map(|pid| pid as u32),
       Err(e) => {
-        log!("no browser pid, so no sound: {e}");
+        log!("no browser pid, so no sound or video: {e}");
         None
       }
     };
+    let _capture = self
+      .pid
+      .map(|pid| audio::start(pid, pcm_tx, self.status.lock().unwrap().sound.clone(), self.audio_device.clone()));
+    let (video_tx, mut video_rx) = mpsc::unbounded_channel();
+    self.video_tx = Some(video_tx);
 
     // Discovery keeps the tab list (with openers) up to date; auto-attach
     // pauses each new target until it has the phone identity.
@@ -315,6 +386,11 @@ impl Hub {
             msg.push(2);
             msg.extend_from_slice(&pcm);
             self.to_client(Message::binary(msg));
+          }
+        },
+        Some((generation, au)) = video_rx.recv() => {
+          if generation == self.video_gen && self.video.is_some() {
+            self.to_client(Message::binary(au));
           }
         },
         c = cmds.recv() => match c {
@@ -378,12 +454,21 @@ impl Hub {
     } else {
       json!({ "type": "portraitPrimary", "angle": 0 })
     };
+    // The density Umbra really renders at (normally the phone's own, see
+    // on_hello): emulating another one would make Chrome scale the page
+    // inside the window, and the video would be resampled.
     self.cdp().send(
       "Emulation.setDeviceMetricsOverride",
-      json!({ "width": w, "height": h, "deviceScaleFactor": v.dpr, "mobile": v.mobile,
+      json!({ "width": w, "height": h, "deviceScaleFactor": self.scale, "mobile": v.mobile,
               "screenWidth": sw, "screenHeight": sh, "screenOrientation": orientation }),
       Some(session),
     );
+  }
+
+  /// The page's size in the window, in physical pixels (even, for H.264).
+  fn page_px(&self) -> (u32, u32) {
+    let even = |css: f64| ((css * self.scale).round() as u32 + 1) & !1;
+    (even(self.view.w), even(self.view.h))
   }
 
   /// Gives a newly attached target the phone identity, then lets it run.
@@ -433,7 +518,8 @@ impl Hub {
       cdp.send("Page.reload", json!({}), s);
     }
     let opened_here = self.target.is_some() && info["openerId"].as_str() == self.target.as_deref();
-    if self.target.is_none() || opened_here {
+    if self.target.is_none() || opened_here || self.open_next {
+      self.open_next = false;
       self.show_tab(target).await;
     }
   }
@@ -448,22 +534,73 @@ impl Hub {
     self.in_flight = 0;
     self.target = Some(target.clone());
     self.session = Some(session);
-    self.place_window().await;
+    // Another tab may live in another window.
+    self.video = None;
     self.start_stream().await;
     if let Ok(r) = self.cdp().call("Target.getTargetInfo", json!({ "targetId": target }), None).await {
       self.on_info(&r["targetInfo"]);
     }
+    self.send_tabs();
   }
 
-  /// (Re)starts the screencast of the tab on screen at the phone's size.
+  /// Keeps a tab's title and address for the phone's tab list.
+  fn note_tab(&mut self, info: &Value) {
+    let id = info["targetId"].as_str().unwrap_or_default().to_string();
+    let entry = (info["title"].as_str().unwrap_or_default().to_string(), info["url"].as_str().unwrap_or_default().to_string());
+    if self.tab_info.get(&id) != Some(&entry) {
+      self.tab_info.insert(id, entry);
+      self.send_tabs();
+    }
+  }
+
+  fn send_tabs(&mut self) {
+    let list: Vec<Value> = self
+      .pages
+      .iter()
+      .filter_map(|(id, _)| self.tab_info.get(id).map(|(title, url)| json!({ "id": id, "title": title, "url": url })))
+      .collect();
+    self.to_client_json(json!({ "t": "tabs", "current": self.target, "list": list }));
+  }
+
+  /// Opens a tab and puts it on screen. DevTools can't open tabs in
+  /// Umbra's always-private profile (Target.createTarget fails there), so
+  /// the tab on screen opens it: window.open from an isolated world (page
+  /// scripts can't see it, or replace window.open), as a user gesture so
+  /// the pop-up blocker lets it through. "noopener" makes it a tab of its
+  /// own rather than a pop-up tied to this page.
+  async fn new_tab(&mut self, url: &str) {
+    let (Some(cdp), Some(s), Some(t)) = (self.cdp.clone(), self.session.clone(), self.target.clone()) else { return };
+    let world = cdp
+      .call("Page.createIsolatedWorld", json!({ "frameId": t, "worldName": "umbra" }), Some(&s))
+      .await
+      .map(|w| w["executionContextId"].clone());
+    let Ok(context) = world else { return log!("can't open a tab from this page") };
+    self.open_next = true;
+    let expr = format!("window.open({}, '_blank', 'noopener')", json!(to_url(url)));
+    if let Err(e) = cdp
+      .call("Runtime.evaluate", json!({ "expression": expr, "contextId": context, "userGesture": true }), Some(&s))
+      .await
+    {
+      self.open_next = false;
+      log!("new tab: {e}");
+    }
+  }
+
+  /// (Re)starts the picture of the tab on screen at the phone's size:
+  /// video if the PC can encode it, else the JPEG screencast.
   async fn start_stream(&mut self) {
     let Some(s) = self.session.clone() else { return };
     self.apply_metrics(&s).await;
+    self.place_window().await;
     let cdp = self.cdp().clone();
     cdp.send("Page.stopScreencast", json!({}), Some(&s));
     self.pending_ack = None;
     self.in_flight = 0;
     if self.client.is_none() || !self.phone_view {
+      self.video = None;
+      return;
+    }
+    if self.start_video() {
       return;
     }
     let v = self.view;
@@ -479,25 +616,101 @@ impl Hub {
       .await;
   }
 
-  /// Parks the browser window off-screen, or brings it back.
-  async fn place_window(&self) {
-    let Some(t) = &self.target else { return };
-    let cdp = self.cdp();
+  /// Starts (or keeps) the video stream; false if the PC can't do video.
+  fn start_video(&mut self) -> bool {
+    let (Some(hwnd), Some(tx)) = (self.hwnd, self.video_tx.clone()) else { return false };
+    if self.video_broken {
+      return false;
+    }
+    let (width, height) = self.page_px();
+    // Megabits per second for the phone's quality preset, at 60 fps.
+    let bitrate = match self.view.quality {
+      ..=50 => 5_000_000,
+      51..=75 => 10_000_000,
+      _ => 18_000_000,
+    };
+    let settings = video::Settings { width, height, bitrate, fps: 60, place: self.place };
+    self.video_in_flight.store(0, Ordering::Relaxed);
+    if let Some(v) = &self.video {
+      if v.hwnd == hwnd && v.settings == settings {
+        // Same stream: the phone restarts its decoder on a fresh keyframe.
+        v.request_key();
+        self.video_started(width, height);
+        return true;
+      }
+    }
+    self.video = None;
+    self.video_gen += 1;
+    let generation = self.video_gen;
+    let started = tokio::task::block_in_place(|| {
+      video::start(hwnd, settings, move |au| drop(tx.send((generation, au))), self.video_in_flight.clone())
+    });
+    match started {
+      Ok(v) => {
+        self.video = Some(v);
+        self.video_started(width, height);
+        true
+      }
+      Err(e) => {
+        log!("no video, using the JPEG screencast: {e}");
+        self.video_broken = true;
+        false
+      }
+    }
+  }
+
+  /// Tells the phone a stream of this size starts (and the page's size,
+  /// for mapping touches).
+  fn video_started(&mut self, width: u32, height: u32) {
+    self.to_client_json(json!({ "t": "video", "w": width, "h": height }));
+    let vp = (self.view.w.round() as i64, self.view.h.round() as i64);
+    self.last_vp = vp;
+    self.to_client_json(json!({ "t": "vp", "w": vp.0, "h": vp.1 }));
+  }
+
+  /// Parks the browser window off-screen (or brings it back), with the tab
+  /// on screen in front and room for the page at the phone's resolution.
+  async fn place_window(&mut self) {
+    let Some(t) = self.target.clone() else { return };
+    let cdp = self.cdp().clone();
     let Ok(w) = cdp.call("Browser.getWindowForTarget", json!({ "targetId": t }), None).await else {
       return;
     };
-    let id = w["windowId"].clone();
-    let _ = cdp
-      .call("Browser.setWindowBounds", json!({ "windowId": id, "bounds": { "windowState": "normal" } }), None)
-      .await;
+    // Not when full screen: that would take the page out of it (the window
+    // itself stays parked either way, see video.rs).
+    if w["bounds"]["windowState"] == "minimized" || w["bounds"]["windowState"] == "maximized" {
+      let _ = cdp
+        .call("Browser.setWindowBounds", json!({ "windowId": w["windowId"], "bounds": { "windowState": "normal" } }), None)
+        .await;
+    }
+    // Only the active tab of a window is drawn into it.
+    let _ = cdp.call("Target.activateTarget", json!({ "targetId": t }), None).await;
+    let Some(pid) = self.pid else { return };
+    let windows = window::browser_windows(pid);
+    let title = cdp
+      .call("Target.getTargetInfo", json!({ "targetId": t }), None)
+      .await
+      .ok()
+      .and_then(|r| r["targetInfo"]["title"].as_str().map(String::from))
+      .unwrap_or_default();
+    // Window titles are "<tab title> - Umbra".
+    let hwnd = match windows.as_slice() {
+      [] => None,
+      [only] => Some(*only),
+      many => many.iter().copied().find(|h| !title.is_empty() && window::title(*h).starts_with(&title)).or(Some(many[0])),
+    };
+    let Some(hwnd) = hwnd else { return };
+    let (pw, ph) = self.page_px();
+    // Above the page: tab strip, toolbar and the odd infobar.
+    let chrome_ui = (240.0 * self.scale) as i32;
     let (left, top) = if self.shown { (80, 40) } else { (-32000, -32000) };
-    let _ = cdp
-      .call(
-        "Browser.setWindowBounds",
-        json!({ "windowId": id, "bounds": { "left": left, "top": top, "width": 600, "height": 1100 } }),
-        None,
-      )
-      .await;
+    self.place = (left, top, (pw as i32 + 64).max(800), ph as i32 + chrome_ui);
+    window::place(hwnd, self.place.0, self.place.1, self.place.2, self.place.3);
+    window::set_invisible(hwnd, !self.shown);
+    if self.hwnd != Some(hwnd) {
+      self.video = None;
+    }
+    self.hwnd = Some(hwnd);
   }
 
   fn on_info(&mut self, info: &Value) {
@@ -563,6 +776,7 @@ impl Hub {
           if !self.pages.iter().any(|(t, _)| *t == id) {
             self.pages.push((id, info["openerId"].as_str().map(String::from)));
           }
+          self.note_tab(info);
         }
       }
       "Target.targetDestroyed" => {
@@ -570,6 +784,9 @@ impl Hub {
         let opener = self.pages.iter().find(|(t, _)| t == id).and_then(|(_, o)| o.clone());
         self.pages.retain(|(t, _)| t != id);
         self.sessions.remove(id);
+        if self.tab_info.remove(id).is_some() {
+          self.send_tabs();
+        }
         if self.target.as_deref() == Some(id) {
           self.target = None;
           self.session = None;
@@ -588,6 +805,9 @@ impl Hub {
         if info["type"] == "page" && info["subtype"] != "prerender" && !self.pages.iter().any(|(t, _)| *t == id) {
           // A prerendered page that was just shown becomes an ordinary tab.
           self.pages.push((id.clone(), None));
+        }
+        if self.pages.iter().any(|(t, _)| *t == id) {
+          self.note_tab(info);
         }
         if Some(id.as_str()) == self.target.as_deref() {
           self.on_info(info);
@@ -623,6 +843,8 @@ impl Hub {
         }
         self.client = Some(Client { id, tx });
         self.last_vp = (0, 0);
+        self.touch_clock = None;
+        self.fullscreen.store(false, Ordering::Relaxed);
         self.status.lock().unwrap().phone = Some(peer);
       }
       ClientMsg::Closed(id) => {
@@ -635,6 +857,8 @@ impl Hub {
           }
           self.pending_ack = None;
           self.in_flight = 0;
+          // Nobody watching: stop capturing and encoding.
+          self.video = None;
         }
       }
       ClientMsg::Text(id, text) => {
@@ -650,6 +874,7 @@ impl Hub {
   async fn on_phone(&mut self, v: Value) {
     match v["t"].as_str().unwrap_or_default() {
       "new_identity" => {
+        log!("new Tor identity (phone asked)");
         self.exit = Some(Exit::Restart);
         return;
       }
@@ -663,13 +888,27 @@ impl Hub {
     let (Some(cdp), Some(s)) = (self.cdp.clone(), self.session.clone()) else { return };
     let s = Some(s.as_str());
     match v["t"].as_str().unwrap_or_default() {
+      "ack" if self.video.is_some() => {
+        let _ = self.video_in_flight.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+      }
       "ack" => {
         self.in_flight = self.in_flight.saturating_sub(1);
         if let Some((sess, fid)) = self.pending_ack.take() {
           cdp.send("Page.screencastFrameAck", json!({ "sessionId": fid }), Some(&sess));
         }
       }
+      "idr" => {
+        if let Some(video) = &self.video {
+          video.request_key();
+        }
+      }
+      "exit_fullscreen" => cdp.send(
+        "Runtime.evaluate",
+        json!({ "expression": "document.fullscreenElement && document.exitFullscreen()" }),
+        s,
+      ),
       "touch" => {
+        let ts = self.touch_time(v["ts"].as_f64());
         let pts: Vec<Value> = v["p"]
           .as_array()
           .map(|a| {
@@ -679,19 +918,20 @@ impl Hub {
           })
           .unwrap_or_default();
         let k = v["k"].as_str().unwrap_or_default();
+        let touch = |ty: &str, pts: &[Value]| {
+          cdp.send("Input.dispatchTouchEvent", json!({ "type": ty, "touchPoints": pts, "timestamp": ts }), s)
+        };
         match (k, pts.is_empty()) {
-          ("start", false) | ("move", false) => {
-            let ty = if k == "start" { "touchStart" } else { "touchMove" };
-            cdp.send("Input.dispatchTouchEvent", json!({ "type": ty, "touchPoints": pts }), s);
-          }
-          ("cancel", _) => cdp.send("Input.dispatchTouchEvent", json!({ "type": "touchCancel", "touchPoints": [] }), s),
+          ("start", false) => touch("touchStart", &pts),
+          ("move", false) => touch("touchMove", &pts),
+          ("cancel", _) => touch("touchCancel", &[]),
           ("end", _) => {
             // CDP's touchEnd releases every point; restart any that remain.
-            cdp.send("Input.dispatchTouchEvent", json!({ "type": "touchEnd", "touchPoints": [] }), s);
+            touch("touchEnd", &[]);
             if !pts.is_empty() {
-              cdp.send("Input.dispatchTouchEvent", json!({ "type": "touchStart", "touchPoints": pts }), s);
+              touch("touchStart", &pts);
             } else {
-              self.check_keyboard();
+              self.check_page(true);
             }
           }
           _ => {}
@@ -703,7 +943,10 @@ impl Hub {
         s,
       ),
       "text" => cdp.send("Input.insertText", json!({ "text": v["s"] }), s),
-      "key" => press_key(&cdp, s, v["key"].as_str().unwrap_or_default()),
+      "key" => {
+        press_key(&cdp, s, v["key"].as_str().unwrap_or_default());
+        self.check_page(false);
+      }
       "nav" => {
         let url = to_url(v["url"].as_str().unwrap_or_default());
         cdp.send("Page.navigate", json!({ "url": url }), s);
@@ -724,6 +967,28 @@ impl Hub {
         }
       }
       "reload" => cdp.send("Page.reload", json!({}), s),
+      "tabs" => self.send_tabs(),
+      "new_tab" => {
+        let url = v["url"].as_str().filter(|u| !u.trim().is_empty()).map(String::from).unwrap_or_else(|| self.home.clone());
+        self.new_tab(&url).await;
+      }
+      "switch_tab" => {
+        if let Some(id) = v["id"].as_str().filter(|id| self.pages.iter().any(|(t, _)| t == id)) {
+          if Some(id) != self.target.as_deref() {
+            self.show_tab(id.to_string()).await;
+          }
+        }
+      }
+      "close_tab" => {
+        if let Some(id) = v["id"].as_str().filter(|id| self.pages.iter().any(|(t, _)| t == id)).map(String::from) {
+          // Closing Umbra's last tab would close Umbra: open a fresh one first.
+          if self.pages.len() <= 1 {
+            let home = self.home.clone();
+            self.new_tab(&home).await;
+          }
+          cdp.send("Target.closeTarget", json!({ "targetId": id }), None);
+        }
+      }
       "dialog" => cdp.send(
         "Page.handleJavaScriptDialog",
         json!({ "accept": v["accept"].as_bool().unwrap_or(false), "promptText": v["text"].as_str().unwrap_or("") }),
@@ -748,9 +1013,20 @@ impl Hub {
       quality: v["quality"].as_i64().unwrap_or(70).clamp(20, 95),
     };
     self.phone_view = true;
+    if (self.view.dpr - browser::phone_dpr().unwrap_or(0.0)).abs() > 0.001 {
+      browser::save_phone_dpr(self.view.dpr);
+    }
     let sound = self.status.lock().unwrap().sound.lock().unwrap().clone();
     self.to_client_json(json!({ "t": "audio", "rate": audio::RATE, "ch": audio::CHANNELS, "state": sound }));
     if self.cdp.is_none() {
+      return;
+    }
+    if (self.view.dpr - self.scale).abs() > 0.01 && !self.video_broken && !self.rescaled {
+      // Umbra's density is fixed at start: restart it once at this
+      // phone's, so the video is pixel for pixel (it reopens the page).
+      log!("restarting Umbra at the phone's density {} (was {})", self.view.dpr, self.scale);
+      self.rescaled = true;
+      self.exit = Some(Exit::Restart);
       return;
     }
     if old.mobile != self.view.mobile {
@@ -785,27 +1061,66 @@ impl Hub {
     }
   }
 
-  /// After a tap, tell the phone whether a text field now has focus so it
-  /// can raise its keyboard.
-  fn check_keyboard(&self) {
+  /// When a touch happened, in Chrome's clock (epoch seconds). Chrome
+  /// works out fling speed from these, so they must follow the finger, not
+  /// the Wi-Fi: phone event times are shifted by the smallest delay seen
+  /// so far (the clocks differ by an offset, the network adds jitter).
+  fn touch_time(&mut self, phone_ms: Option<f64>) -> f64 {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let t = match phone_ms {
+      Some(ms) => {
+        let offset = now - ms / 1000.0;
+        let clock = self.touch_clock.map_or(offset, |c| c.min(offset));
+        self.touch_clock = Some(clock);
+        ms / 1000.0 + clock
+      }
+      None => now,
+    };
+    // Never backwards (the offset can shrink mid-swipe).
+    self.last_touch_ts = t.max(self.last_touch_ts + 0.000_1);
+    self.last_touch_ts
+  }
+
+  /// After a tap or key: tell the phone whether a text field now has
+  /// focus (so it can raise its keyboard; taps only) and whether the page
+  /// went in or out of full screen (so it can hide its toolbar). While full
+  /// screen, keeps checking, to notice the page leaving it on its own.
+  fn check_page(&self, keyboard: bool) {
     let (Some(cdp), Some(s), Some(c)) = (self.cdp.clone(), self.session.clone(), self.client.as_ref()) else {
       return;
     };
     let tx = c.tx.clone();
+    let fullscreen = self.fullscreen.clone();
     tokio::spawn(async move {
-      tokio::time::sleep(Duration::from_millis(150)).await;
       let expr = r#"(() => { let e = document.activeElement;
         while (e && e.shadowRoot && e.shadowRoot.activeElement) e = e.shadowRoot.activeElement;
-        if (!e) return false; if (e.isContentEditable || e.tagName === 'TEXTAREA') return true;
-        if (e.tagName !== 'INPUT') return false;
-        return !['button','checkbox','radio','submit','reset','file','image','range','color','hidden']
-          .includes((e.type || 'text').toLowerCase()); })()"#;
-      if let Ok(r) = cdp
-        .call("Runtime.evaluate", json!({ "expression": expr, "returnByValue": true }), Some(&s))
-        .await
-      {
-        let on = r["result"]["value"].as_bool().unwrap_or(false);
-        let _ = tx.send(Message::text(json!({ "t": "kbd", "on": on }).to_string()));
+        const fs = !!document.fullscreenElement;
+        if (!e) return [false, fs]; if (e.isContentEditable || e.tagName === 'TEXTAREA') return [true, fs];
+        if (e.tagName !== 'INPUT') return [false, fs];
+        return [!['button','checkbox','radio','submit','reset','file','image','range','color','hidden']
+          .includes((e.type || 'text').toLowerCase()), fs]; })()"#;
+      let mut first = true;
+      loop {
+        tokio::time::sleep(Duration::from_millis(if first { 150 } else { 1000 })).await;
+        let Ok(r) = cdp.call("Runtime.evaluate", json!({ "expression": expr, "returnByValue": true }), Some(&s)).await
+        else {
+          return;
+        };
+        let v = &r["result"]["value"];
+        if first && keyboard {
+          let _ = tx.send(Message::text(json!({ "t": "kbd", "on": v[0].as_bool().unwrap_or(false) }).to_string()));
+        }
+        let fs = v[1].as_bool().unwrap_or(false);
+        let was = fullscreen.swap(fs, Ordering::Relaxed);
+        if fs != was {
+          let _ = tx.send(Message::text(json!({ "t": "fullscreen", "on": fs }).to_string()));
+        }
+        // One check keeps watch while full screen (the one that saw it
+        // start); the others only report.
+        if !fs || (was && first) || tx.is_closed() {
+          return;
+        }
+        first = false;
       }
     });
   }
@@ -860,7 +1175,7 @@ fn press_key(cdp: &Cdp, s: Option<&str>, key: &str) {
 /// domains get https://, anything else is a search.
 fn to_url(input: &str) -> String {
   let s = input.trim();
-  if s.contains("://") || s.starts_with("about:") || s.starts_with("chrome:") {
+  if s.contains("://") || ["about:", "chrome:", "data:"].iter().any(|p| s.starts_with(p)) {
     return s.to_string();
   }
   if !s.contains(' ') && s.contains('.') {

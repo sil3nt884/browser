@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The tab button: the number of open tabs in a rounded square, like Chrome on a phone. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android" android:inset="11dp">
+    <shape android:shape="rectangle">
+        <stroke android:width="2dp" android:color="@color/fg" />
+        <corners android:radius="5dp" />
+    </shape>
+</inset>

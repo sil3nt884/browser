@@ -6,6 +6,10 @@
     <string name="reload">Reload</string>
     <string name="keyboard">Keyboard</string>
     <string name="menu">Menu</string>
+    <string name="tabs">Tabs</string>
+    <string name="new_tab">New tab</string>
+    <string name="close_tab">Close tab</string>
+    <string name="close">Close</string>
     <string name="forward">Forward</string>
     <string name="desktop_site">Desktop site</string>
     <string name="quality">Picture quality</string>

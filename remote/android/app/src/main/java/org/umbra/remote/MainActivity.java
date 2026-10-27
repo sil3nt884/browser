@@ -15,14 +15,20 @@ import android.os.Looper;
 import android.text.InputType;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.BaseAdapter;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageButton;
+import android.widget.LinearLayout;
+import android.widget.ListView;
 import android.widget.PopupMenu;
 import android.widget.ProgressBar;
 import android.widget.TextView;
@@ -41,7 +47,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * screen shows it at the phone's size and sends touches, typing and
  * navigation back. Nothing is rendered or fetched on the phone itself.
  */
-public final class MainActivity extends Activity implements RemoteConnection.Listener, ScreenView.Host {
+public final class MainActivity extends Activity
+        implements RemoteConnection.Listener, ScreenView.Host, VideoDecoder.Listener {
     private static final String PREF_ADDRESS = "address";
     private static final String PREF_DESKTOP = "desktop";
     private static final String PREF_QUALITY = "quality";
@@ -54,14 +61,27 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
     private android.net.wifi.WifiManager.WifiLock wifiLock;
     private final AudioPlayer audio = new AudioPlayer();
     private final RemoteConnection conn = new RemoteConnection(this);
+    private VideoDecoder video;
     private SharedPreferences prefs;
     private ScreenView screen;
+    private SurfaceView videoView;
+    /** The video stream's size in pixels (0 while not streaming video). */
+    private int videoW, videoH;
     private EditText url;
     private ProgressBar progress;
     private TextView status;
     private ImageButton keyboard, exitFullscreen;
+    private TextView tabsButton;
+    /** The PC's open tabs ({id, title, url}, oldest first) and the one on screen. */
+    private JSONArray tabList = new JSONArray();
+    private String currentTab = "";
+    /** The tab list while it is open (it follows changes on the PC). */
+    private TabsAdapter tabsAdapter;
     private View root, bar;
-    private boolean started, replaced, soundHintShown, fullscreen;
+    /** fullscreen: the user's setting; pageFullscreen: the page (a video,
+     *  a game) is full screen, which hides the toolbar too, for as long;
+     *  immersive: what's applied (either of them). */
+    private boolean started, replaced, soundHintShown, fullscreen, pageFullscreen, immersive;
     private final Runnable sendHello = this::hello;
     private final Runnable reconnect = this::connect;
     private final Runnable hideExitButton = () -> exitFullscreen.setVisibility(View.GONE);
@@ -73,6 +93,23 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
         setContentView(R.layout.activity_main);
         prefs = getSharedPreferences("umbra", Context.MODE_PRIVATE);
         screen = findViewById(R.id.screen);
+        videoView = findViewById(R.id.video);
+        video = new VideoDecoder(this);
+        videoView.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder h) {
+                video.setSurface(h.getSurface());
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder h, int format, int w, int hgt) {
+            }
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder h) {
+                video.setSurface(null);
+            }
+        });
         url = findViewById(R.id.url);
         progress = findViewById(R.id.progress);
         status = findViewById(R.id.status);
@@ -93,6 +130,8 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
             else screen.showKeyboard();
         });
         findViewById(R.id.menu).setOnClickListener(this::showMenu);
+        tabsButton = findViewById(R.id.tabs);
+        tabsButton.setOnClickListener(v -> showTabs());
         url.setOnEditorActionListener((v, actionId, event) -> {
             if (actionId == EditorInfo.IME_ACTION_GO || actionId == EditorInfo.IME_NULL) {
                 String text = url.getText().toString().trim();
@@ -115,11 +154,13 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
             root.setOnApplyWindowInsetsListener((v, insets) -> {
                 // In full screen the system bars only slide in over the page
                 // when swiped, so they don't push it around.
-                int types = WindowInsets.Type.ime() | WindowInsets.Type.displayCutout();
-                if (!fullscreen) types |= WindowInsets.Type.systemBars();
+                int types = WindowInsets.Type.ime();
+                // A full-screen page (a video) goes edge to edge, into the cutout too.
+                if (!pageFullscreen) types |= WindowInsets.Type.displayCutout();
+                if (!immersive) types |= WindowInsets.Type.systemBars();
                 Insets i = insets.getInsets(types);
                 v.setPadding(i.left, i.top, i.right, i.bottom);
-                if (fullscreen && insets.isVisible(WindowInsets.Type.statusBars())) flashExitButton();
+                if (immersive && !pageFullscreen && insets.isVisible(WindowInsets.Type.statusBars())) flashExitButton();
                 return WindowInsets.CONSUMED;
             });
         } else {
@@ -135,6 +176,11 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
     private void setFullscreen(boolean on) {
         fullscreen = on;
         prefs.edit().putBoolean(PREF_FULLSCREEN, on).apply();
+        applyFullscreen(on || pageFullscreen);
+    }
+
+    private void applyFullscreen(boolean on) {
+        immersive = on;
         bar.setVisibility(on ? View.GONE : View.VISIBLE);
         if (on) progress.setVisibility(View.GONE);
         else if (progress.getVisibility() == View.GONE) progress.setVisibility(View.INVISIBLE);
@@ -149,7 +195,7 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
         } else {
             legacyFullscreen(on);
         }
-        if (on) {
+        if (on && !pageFullscreen) {
             flashExitButton();
         } else {
             main.removeCallbacks(hideExitButton);
@@ -165,7 +211,7 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 : 0);
         decor.setOnSystemUiVisibilityChangeListener(vis -> {
-            if (fullscreen && (vis & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) flashExitButton();
+            if (immersive && !pageFullscreen && (vis & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) flashExitButton();
         });
     }
 
@@ -173,7 +219,7 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         // Before Android 11 the system forgets immersive mode after dialogs.
-        if (hasFocus && fullscreen && Build.VERSION.SDK_INT < 30) legacyFullscreen(true);
+        if (hasFocus && immersive && Build.VERSION.SDK_INT < 30) legacyFullscreen(true);
     }
 
     private void flashExitButton() {
@@ -238,9 +284,17 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
         if (url.hasFocus()) {
             url.clearFocus();
             hideIme(url);
+        } else if (pageFullscreen) {
+            conn.send("exit_fullscreen"); // like Back in Chrome on a phone
         } else {
             conn.send("back");
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        video.quit();
     }
 
     // ---- connection -------------------------------------------------------
@@ -317,6 +371,8 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
     @Override
     public void onClosed(boolean wasReplaced) {
         audio.stop();
+        stopVideo();
+        setPageFullscreen(false);
         replaced = wasReplaced;
         if (wasReplaced) {
             say(getString(R.string.status_replaced));
@@ -334,6 +390,7 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
      */
     @Override
     public void onFrame(byte[] data, int offset, int length) {
+        if (videoW != 0) main.post(this::stopVideo); // the PC fell back to JPEG
         byte[] jpeg = offset == 0 && length == data.length ? data : Arrays.copyOfRange(data, offset, offset + length);
         if (nextFrame.getAndSet(jpeg) != null) conn.send("ack");
         else decoder.execute(this::decodeNewest);
@@ -346,6 +403,68 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
         main.post(() -> {
             if (b != null && status.getVisibility() == View.VISIBLE && !replaced) say(null);
             screen.show(b);
+        });
+    }
+
+    @Override
+    public void onVideo(byte[] data, int offset, int length) {
+        video.feed(data, offset, length);
+    }
+
+    /** A new video stream of this size (pixels) starts. */
+    private void startVideo(int w, int h) {
+        videoW = w;
+        videoH = h;
+        screen.setVideoSize(w, h);
+        videoView.getHolder().setFixedSize(w, h);
+        placeVideo();
+        videoView.setVisibility(View.VISIBLE);
+        video.configure(w, h);
+    }
+
+    private void stopVideo() {
+        if (videoW == 0) return;
+        videoW = videoH = 0;
+        video.configure(0, 0);
+    }
+
+    /** Fits the video to the screen; mid-rotation it is letterboxed, not stretched. */
+    private void placeVideo() {
+        if (videoW == 0 || screen.getWidth() == 0) return;
+        android.graphics.Rect r = screen.placeFor(videoW, videoH);
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) videoView.getLayoutParams();
+        if (lp.width != r.width() || lp.height != r.height() || lp.leftMargin != r.left || lp.topMargin != r.top) {
+            lp.width = r.width();
+            lp.height = r.height();
+            lp.leftMargin = r.left;
+            lp.topMargin = r.top;
+            lp.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
+            videoView.setLayoutParams(lp);
+        }
+    }
+
+    private void setPageFullscreen(boolean on) {
+        if (pageFullscreen == on) return;
+        pageFullscreen = on;
+        applyFullscreen(fullscreen || on);
+    }
+
+    // ---- video decoder callbacks (decoder thread) --------------------------
+
+    @Override
+    public void onAck() {
+        conn.send("ack");
+    }
+
+    @Override
+    public void onNeedKeyframe() {
+        conn.send("idr");
+    }
+
+    @Override
+    public void onFirstFrame() {
+        main.post(() -> {
+            if (status.getVisibility() == View.VISIBLE && !replaced) say(null);
         });
     }
 
@@ -374,6 +493,20 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
                 break;
             case "vp":
                 screen.setPageSize((float) m.optDouble("w"), (float) m.optDouble("h"));
+                break;
+            case "video":
+                startVideo(m.optInt("w"), m.optInt("h"));
+                break;
+            case "fullscreen":
+                setPageFullscreen(m.optBoolean("on"));
+                break;
+            case "tabs":
+                JSONArray list = m.optJSONArray("list");
+                tabList = list != null ? list : new JSONArray();
+                currentTab = m.optString("current");
+                int n = tabList.length();
+                tabsButton.setText(n < 100 ? String.valueOf(n) : ":D");
+                if (tabsAdapter != null) tabsAdapter.notifyDataSetChanged();
                 break;
             case "kbd":
                 if (m.optBoolean("on")) screen.showKeyboard();
@@ -415,12 +548,13 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
 
     @Override
     public void onSizeChanged(int widthPx, int heightPx) {
+        placeVideo();
         main.removeCallbacks(sendHello);
         main.postDelayed(sendHello, 150);
     }
 
     @Override
-    public void onTouch(String kind, JSONArray points) {
+    public void onTouch(String kind, JSONArray points, long time) {
         if (replaced) {
             if ("start".equals(kind)) connect(); // take Umbra over from the other device
             return;
@@ -430,7 +564,7 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
             hideIme(url);
         }
         try {
-            conn.send(new JSONObject().put("t", "touch").put("k", kind).put("p", points));
+            conn.send(new JSONObject().put("t", "touch").put("k", kind).put("p", points).put("ts", time));
         } catch (org.json.JSONException ignored) {
         }
     }
@@ -450,6 +584,7 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
     private void showMenu(View anchor) {
         PopupMenu p = new PopupMenu(this, anchor);
         Menu m = p.getMenu();
+        m.add(0, 9, 0, R.string.new_tab);
         m.add(0, 1, 0, R.string.forward);
         MenuItem desktop = m.add(0, 2, 1, R.string.desktop_site);
         desktop.setCheckable(true).setChecked(prefs.getBoolean(PREF_DESKTOP, false));
@@ -479,6 +614,8 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
                 });
             } else if (id == 8) {
                 confirm(R.string.restart_agent, R.string.restart_agent_message, () -> conn.send("restart_agent"));
+            } else if (id == 9) {
+                newTab();
             } else if (id == 1) {
                 conn.send("fwd");
             } else if (id == 2) {
@@ -495,6 +632,113 @@ public final class MainActivity extends Activity implements RemoteConnection.Lis
             return true;
         });
         p.show();
+    }
+
+    // ---- tabs -----------------------------------------------------------------
+
+    private void showTabs() {
+        conn.send("tabs"); // fresh titles; the list updates when they arrive
+        TabsAdapter adapter = new TabsAdapter();
+        ListView list = new ListView(this);
+        list.setAdapter(adapter);
+        list.setDivider(null);
+        AlertDialog d = new AlertDialog.Builder(this)
+                .setTitle(R.string.tabs)
+                .setView(list)
+                .setPositiveButton(R.string.new_tab, (dialog, w) -> newTab())
+                .setNegativeButton(R.string.close, null)
+                .create();
+        list.setOnItemClickListener((parent, view, pos, id) -> {
+            conn.send("switch_tab", "id", adapter.id(pos));
+            d.dismiss();
+        });
+        d.setOnDismissListener(dialog -> {
+            if (tabsAdapter == adapter) tabsAdapter = null;
+        });
+        tabsAdapter = adapter;
+        d.show();
+    }
+
+    /** Opens a tab on the PC and gets the address bar ready, like Chrome does. */
+    private void newTab() {
+        conn.send("new_tab");
+        if (fullscreen) setFullscreen(false);
+        url.setText("");
+        url.requestFocus();
+        url.post(() -> {
+            InputMethodManager imm = getSystemService(InputMethodManager.class);
+            if (imm != null) imm.showSoftInput(url, InputMethodManager.SHOW_IMPLICIT);
+        });
+    }
+
+    private final class TabsAdapter extends BaseAdapter {
+        @Override
+        public int getCount() {
+            return tabList.length();
+        }
+
+        @Override
+        public Object getItem(int pos) {
+            return tabList.optJSONObject(pos);
+        }
+
+        @Override
+        public long getItemId(int pos) {
+            return pos;
+        }
+
+        String id(int pos) {
+            JSONObject t = tabList.optJSONObject(pos);
+            return t != null ? t.optString("id") : "";
+        }
+
+        @Override
+        public View getView(int pos, View convert, android.view.ViewGroup parent) {
+            float dp = getResources().getDisplayMetrics().density;
+            JSONObject t = tabList.optJSONObject(pos);
+            String title = t != null ? t.optString("title") : "";
+            String address = t != null ? t.optString("url") : "";
+            boolean current = id(pos).equals(currentTab);
+
+            LinearLayout row = new LinearLayout(MainActivity.this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            row.setMinimumHeight((int) (60 * dp));
+            row.setPadding((int) (24 * dp), (int) (6 * dp), (int) (8 * dp), (int) (6 * dp));
+
+            LinearLayout texts = new LinearLayout(MainActivity.this);
+            texts.setOrientation(LinearLayout.VERTICAL);
+            TextView name = new TextView(MainActivity.this);
+            name.setText(!title.isEmpty() ? title : !address.isEmpty() ? address : getString(R.string.new_tab));
+            name.setTextSize(16);
+            name.setSingleLine(true);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            if (current) {
+                name.setTextColor(getColor(R.color.accent));
+                name.setTypeface(name.getTypeface(), android.graphics.Typeface.BOLD);
+            }
+            TextView where = new TextView(MainActivity.this);
+            where.setText(address.replaceFirst("^https?://", "").replaceFirst("/$", ""));
+            where.setTextSize(12);
+            where.setAlpha(0.6f);
+            where.setSingleLine(true);
+            where.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            texts.addView(name);
+            if (!address.isEmpty() && !address.equals(title)) texts.addView(where);
+            row.addView(texts, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+
+            ImageButton close = new ImageButton(MainActivity.this);
+            close.setImageResource(R.drawable.ic_close);
+            android.util.TypedValue ripple = new android.util.TypedValue();
+            getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true);
+            close.setBackgroundResource(ripple.resourceId);
+            close.setContentDescription(getString(R.string.close_tab));
+            close.setFocusable(false); // so taps on the row still pick the tab
+            String id = id(pos);
+            close.setOnClickListener(v -> conn.send("close_tab", "id", id));
+            row.addView(close, new LinearLayout.LayoutParams((int) (48 * dp), (int) (48 * dp)));
+            return row;
+        }
     }
 
     private void confirm(int title, int message, Runnable action) {
