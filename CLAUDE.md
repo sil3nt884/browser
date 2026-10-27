@@ -10,6 +10,8 @@ Read README.md, docs/ARCHITECTURE.md and docs/HOOKS.md before changing code.
 
 Built against Chromium 157.0.8103.15 and verified end to end (see "Verified"
 below). The changes from that session are described in `BUILD_REPORT.md`.
+Everything is committed on `main` and pushed to
+<https://github.com/sil3nt884/browser> (remote `origin`).
 
 The browser is packaged as a portable folder at `C:\UmbraBrowser` (run
 `chrome.exe`; tested from there with the build dir hidden) and zipped at

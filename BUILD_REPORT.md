@@ -12,8 +12,8 @@ The build checkout `C:\umbra` was deleted afterwards to free disk space. Every w
 incognito by design. Tor keeps its guard/directory cache in
 `%LOCALAPPDATA%\Umbra\Tor`, so later starts are faster.
 
-> **Nothing is committed yet.** All changes are in the working tree of
-> `C:\me-tor\umbra` (17 files, listed at the end), ready to review and commit.
+> **Committed** (`ef8bc32`, together with Umbra Remote) and pushed to
+> <https://github.com/sil3nt884/browser> on 27 October 2026.
 
 ---
 
@@ -98,7 +98,7 @@ DOMContentLoaded, the same pattern Chromium's extension code uses.
 
 ---
 
-## Changes (uncommitted, in `C:\me-tor\umbra`)
+## Changes (now in commit `ef8bc32`)
 
 | File | Change |
 |---|---|
@@ -127,8 +127,8 @@ DOMContentLoaded, the same pattern Chromium's extension code uses.
   the build folder.
 - **WSL/Docker:** shut down for the build. Start them normally whenever you
   like.
-- **Nothing pushed or committed**, and no files deleted outside the build and
-  scratch folders.
+- No files deleted outside the build and scratch folders (and, at your
+  request, the Chromium checkout `C:\umbra` after packaging).
 
 ## Not done / suggested next steps
 
