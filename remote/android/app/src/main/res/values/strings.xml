@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Umbra Remote</string>
+    <string name="url_hint">Search or type a URL</string>
+    <string name="back">Back</string>
+    <string name="reload">Reload</string>
+    <string name="keyboard">Keyboard</string>
+    <string name="menu">Menu</string>
+    <string name="forward">Forward</string>
+    <string name="desktop_site">Desktop site</string>
+    <string name="quality">Picture quality</string>
+    <string name="quality_low">Fastest (softer)</string>
+    <string name="quality_medium">Balanced</string>
+    <string name="quality_high">Sharpest (slower)</string>
+    <string name="change_pc">Change PC address</string>
+    <string name="full_screen">Full screen</string>
+    <string name="exit_full_screen">Exit full screen</string>
+    <string name="lock_rotation">Lock rotation</string>
+    <string name="new_identity">New Tor identity</string>
+    <string name="new_identity_message">Restart Umbra on the PC with new Tor circuits (a new exit address)? The current page reopens; other tabs and logins are closed.</string>
+    <string name="restart_agent">Restart PC agent</string>
+    <string name="restart_agent_message">Restart Umbra Remote on the PC? The page stays open; this screen reconnects in a few seconds.</string>
+    <string name="restart">Restart</string>
+    <string name="pc_address_title">Connect to your PC</string>
+    <string name="pc_address_message">Enter the address shown in the Umbra Remote tray menu on your PC (for example 192.168.1.20:7777).</string>
+    <string name="connect">Connect</string>
+    <string name="cancel">Cancel</string>
+    <string name="ok">OK</string>
+    <string name="status_connecting">Connecting to %1$s…</string>
+    <string name="status_waiting">Waiting for the page… (Tor can take a few seconds)</string>
+    <string name="status_lost">Lost the PC. Reconnecting…</string>
+    <string name="status_replaced">Umbra is open on another device. Tap to use it here.</string>
+    <string name="sound_off">No sound: install VB-Cable on the PC for phone sound.</string>
+</resources>

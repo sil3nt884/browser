@@ -13,10 +13,11 @@ places.
 
 | Piece | State |
 |---|---|
-| Tor core (Rust, Arti, SOCKS5 front door, C ABI) | Builds and passes its tests |
-| Hook patcher (`scripts/hooks.py`) | Passes tests on Chromium-shaped fixtures |
-| Chromium-side C++ (`app/`, `browser/`, `renderer/`) | Written against Chromium's current APIs, **not yet compiled**; expect a few small API fixes on the first build |
-| Bootstrap / build scripts, CI | Written, not yet run end to end |
+| Tor core (Rust, Arti, SOCKS5 front door, C ABI) | Builds and passes its tests on Windows and Linux |
+| Hook patcher (`scripts/hooks.py`) | Passes tests; applies cleanly to Chromium 157 |
+| Chromium-side C++ (`app/`, `browser/`, `renderer/`) | Builds against Chromium 157 on Windows x64 and works: pages load over Tor, preloading and fail-closed verified |
+| Bootstrap / build scripts | Run end to end on Windows; Android not yet built |
+| CI | Written, not yet run |
 
 ## Quick start
 
@@ -30,8 +31,11 @@ adb install -r dist/Umbra-arm64.apk
 **Windows** (on Windows 10/11 x64 with Visual Studio 2022 + Windows SDK):
 ```bat
 python scripts\bootstrap.py --target win
-python scripts\build.py --target win --installer   :: -> dist\umbra-setup-x64.exe
+python scripts\build.py --target win               :: -> dist\umbra-win-x64\chrome.exe (+ .zip)
+python scripts\build.py --target win --installer   :: also dist\umbra-setup-x64.exe
 ```
+The portable folder runs from anywhere; `scripts\package_win.py` makes one
+from an existing build without rebuilding.
 
 Both need Rust (`rustup`). Each platform must be built on its own host OS;
 that's a Chromium constraint. CI (`.github/workflows/build.yml`) runs the fast
@@ -39,6 +43,10 @@ tests on GitHub's runners and the full builds on your own self-hosted machines.
 
 Before a big sync, `python3 scripts/hooks.py check --src <chromium>/src`
 tells you whether every hook still has its anchor.
+
+**Umbra Remote** (`remote/`): use the PC's Umbra from an Android phone. A
+tray app streams it at the phone's size, and sound plays on the phone only.
+It needs no Chromium rebuild. See `remote/README.md`.
 
 ## How it gets the speed
 

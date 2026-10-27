@@ -94,6 +94,10 @@ def main():
                   help="don't (re)sync Chromium; just relink and re-apply hooks")
   ap.add_argument("--skip-deps", action="store_true",
                   help="skip install-build-deps.sh (Linux, needs sudo)")
+  ap.add_argument("--jobs", type=int, default=8,
+                  help="parallel git fetches during sync; googlesource rate-"
+                       "limits anonymous clients (HTTP 429) at gclient's "
+                       "default of one per CPU")
   args = ap.parse_args()
 
   if args.target == "win" and not IS_WIN:
@@ -121,8 +125,18 @@ def main():
            "android" if args.target == "android" else "chromium"],
           cwd=chromium_dir, env=env)
     ensure_gclient_target_os(chromium_dir, args.target)
-    run(["gclient", "sync", "-D", "--no-history", "--with_tags", "--nohooks",
-         "--revision", f"src@refs/tags/{version}"], cwd=chromium_dir, env=env)
+    # Fetch only the pinned tag, then sync to its commit hash. `--with_tags`
+    # on a --no-history clone negotiates every Chromium tag and can stall for
+    # hours, and gclient re-fetches all of origin for any revision that isn't
+    # a raw SHA (gclient_scm.py: IsValidRevision(..., sha_only=True)).
+    tag = f"refs/tags/{version}"
+    run(["git", "fetch", "--depth=1", "--no-tags", "origin", f"+{tag}:{tag}"],
+        cwd=src, env=env)
+    sha = subprocess.check_output(["git", "rev-parse", f"{tag}^{{commit}}"],
+                                  cwd=src, text=True).strip()
+    run(["gclient", "sync", "-D", "--no-history", "--nohooks",
+         "--jobs", str(args.jobs), "--revision", f"src@{sha}"],
+        cwd=chromium_dir, env=env)
     if args.target == "android" and not args.skip_deps:
       run(["sudo", os.path.join(src, "build", "install-build-deps.sh"),
            "--android", "--no-prompt"], env=env)

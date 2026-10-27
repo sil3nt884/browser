@@ -10,6 +10,7 @@ Options:
   --debug    debug build (much slower to run, faster to link)
   --installer  Windows: also build mini_installer.exe
   --skip-tor   reuse the existing prebuilt Tor core
+  --jobs N     parallel compile jobs (lower it if RAM runs out)
 """
 
 import argparse
@@ -24,6 +25,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IS_WIN = platform.system() == "Windows"
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 from bootstrap import default_work_dir  # noqa: E402
+import package_win  # noqa: E402
 
 
 def run(cmd, cwd=None, env=None):
@@ -58,6 +60,9 @@ def main():
   ap.add_argument("--debug", action="store_true")
   ap.add_argument("--installer", action="store_true")
   ap.add_argument("--skip-tor", action="store_true")
+  ap.add_argument("--jobs", type=int,
+                  help="parallel compile jobs (default: autoninja's choice, "
+                       "one per CPU; lower it on machines with <32 GB RAM)")
   args = ap.parse_args()
   cpu = args.cpu or ("arm64" if args.target == "android" else "x64")
 
@@ -93,7 +98,8 @@ def main():
     targets = ["chrome_public_apk"]
   else:
     targets = ["chrome"] + (["mini_installer"] if args.installer else [])
-  run(["autoninja", "-C", out_rel, *targets], cwd=src, env=env)
+  jobs = ["-j", str(args.jobs)] if args.jobs else []
+  run(["autoninja", *jobs, "-C", out_rel, *targets], cwd=src, env=env)
 
   # 4. Collect outputs.
   dist = os.path.join(ROOT, "dist")
@@ -109,7 +115,11 @@ def main():
     if args.installer:
       inst = os.path.join(out_dir, "mini_installer.exe")
       shutil.copy2(inst, os.path.join(dist, f"umbra-setup-{cpu}.exe"))
-    print(f"\nRun it from the build dir: {os.path.join(out_dir, 'chrome.exe')}")
+    dest = os.path.join(dist, f"umbra-win-{cpu}{'-debug' if args.debug else ''}")
+    if os.path.exists(dest):
+      shutil.rmtree(dest)
+    package_win.package(out_dir, dest, zip_path=dest + ".zip")
+    print(f"\nPortable build: {os.path.join(dest, 'chrome.exe')}")
 
 
 if __name__ == "__main__":

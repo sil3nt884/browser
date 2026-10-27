@@ -4,6 +4,7 @@
 #ifndef UMBRA_RENDERER_PRELOAD_INJECTOR_H_
 #define UMBRA_RENDERER_PRELOAD_INJECTOR_H_
 
+#include "base/memory/weak_ptr.h"
 #include "content/public/renderer/render_frame_observer.h"
 
 namespace content {
@@ -32,8 +33,14 @@ class PreloadInjector : public content::RenderFrameObserver {
   void DidDispatchDOMContentLoadedEvent() override;
   void OnDestruct() override;
 
+  // Runs the script. Posted from DidDispatchDOMContentLoadedEvent(), which
+  // Blink calls inside a ScriptForbiddenScope (FrameLoader::FinishedParsing):
+  // script executed synchronously there is compiled but silently not run.
+  void Inject();
+
   const bool enable_preload_;
   const bool enable_video_;
+  base::WeakPtrFactory<PreloadInjector> weak_factory_{this};
 };
 
 }  // namespace umbra

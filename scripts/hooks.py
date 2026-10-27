@@ -92,14 +92,17 @@ HOOKS: list[Hook] = [
     ),
     Hook(
         name="prefs",
-        path="chrome/browser/prefs/browser_prefs.cc",
+        path="chrome/browser/profiles/pref_service_builder_utils.cc",
         why="Override profile pref defaults (forced incognito, no suggest...).",
         edits=[
             _cc_include("umbra/browser/umbra_prefs.h"),
+            # After the keyed-service prefs are registered too (e.g.
+            # plugins.always_open_pdf_externally comes from PluginPrefsFactory),
+            # so every profile pref exists by the time defaults are changed.
             Edit("insert_after",
-                 [r"^\s*RegisterProfilePrefs\(registry,\s*locale\);",
-                  r"^\s*RegisterProfilePrefs\(registry[^;]*\);"],
-                 "{indent}umbra::OverrideProfilePrefDefaults(registry);"),
+                 r"^\s*BrowserContextDependencyManager::GetInstance\(\)\s*"
+                 r"->RegisterProfilePrefsForServices\(pref_registry\);",
+                 "{indent}umbra::OverrideProfilePrefDefaults(pref_registry);"),
         ],
     ),
     Hook(
@@ -132,7 +135,8 @@ HOOKS: list[Hook] = [
         edits=[
             Edit("insert_after", r"^\s*deps\s*\+?=\s*\[",
                  '{indent}"//umbra/app",\n{indent}"//umbra/browser",',
-                 within=r'^static_library\("browser"\)\s*\{',
+                 # source_set since M157; static_library before.
+                 within=r'^(?:static_library|source_set)\("browser"\)\s*\{',
                  extra_indent="  "),
         ],
     ),
@@ -144,7 +148,7 @@ HOOKS: list[Hook] = [
         edits=[
             Edit("insert_after", r"^\s*deps\s*\+?=\s*\[",
                  '{indent}"//umbra/renderer",',
-                 within=r'^static_library\("renderer"\)\s*\{',
+                 within=r'^(?:static_library|source_set)\("renderer"\)\s*\{',
                  extra_indent="  "),
         ],
     ),
@@ -163,12 +167,24 @@ HOOKS: list[Hook] = [
     ),
     Hook(
         name="media-buffer",
-        path="third_party/blink/renderer/platform/media/multi_buffer_data_source.cc",
+        path="third_party/blink/renderer/platform/media/multi_buffer_data_source.h",
         required=False,
         why="Buffer ~60 s ahead instead of ~10 s for progressive (non-MSE) video.",
         edits=[
-            Edit("replace", r"(kTargetSecondsBufferedAhead\s*=\s*)\d+",
+            # media::Tuneable<int> {name, min, default, max}: raise the default.
+            # 60 is the Tuneable's own max, so it stays in range.
+            Edit("replace",
+                 r'(preload_seconds_\s*=\s*\{\s*'
+                 r'"SrcMediaMultiBufferPreloadSeconds",\s*\d+,\s*)\d+',
                  r"\g<1>60"),
+        ],
+    ),
+    Hook(
+        name="media-buffer-cap",
+        path="third_party/blink/renderer/platform/media/multi_buffer_data_source.cc",
+        required=False,
+        why="Let the 60 s read-ahead use up to 200 MB instead of 50 MB.",
+        edits=[
             Edit("replace", r"(kMaxBufferPreload\s*=\s*)\d+(\s*<<\s*20)",
                  r"\g<1>200\g<2>"),
         ],

@@ -3,3 +3,8 @@ target_os = "win"
 
 # Use the locally installed Visual Studio toolchain.
 # (scripts/build.py also sets DEPOT_TOOLS_WIN_TOOLCHAIN=0.)
+
+# Build with Ninja, not Siso. bootstrap.py links this repo in as src/umbra with
+# an NTFS junction, and Siso (Go >= 1.23 reports junctions as irregular files)
+# fails with 'deps input "../../umbra/app/BUILD.gn" not exist'.
+use_siso = false

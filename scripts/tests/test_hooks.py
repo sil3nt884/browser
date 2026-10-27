@@ -51,10 +51,14 @@ class HooksTest(unittest.TestCase):
     first_stmt = [l for l in body.splitlines() if l.strip()][1]
     self.assertEqual(first_stmt, "  umbra::OnBasicStartupComplete();")
 
-    prefs = read(self.src, "chrome/browser/prefs/browser_prefs.cc")
-    self.assertIn("  RegisterProfilePrefs(registry, locale);\n"
+    prefs = read(self.src,
+                 "chrome/browser/profiles/pref_service_builder_utils.cc")
+    self.assertIn('#include "umbra/browser/umbra_prefs.h"', prefs)
+    # After the keyed-service registration, not the SimpleDependencyManager one.
+    self.assertIn("      ->RegisterProfilePrefsForServices(pref_registry);\n"
                   "  // [umbra] prefs\n"
-                  "  umbra::OverrideProfilePrefDefaults(registry);", prefs)
+                  "  umbra::OverrideProfilePrefDefaults(pref_registry);\n}",
+                  prefs)
 
     rcc = read(self.src, "chrome/renderer/chrome_content_renderer_client.cc")
     self.assertIn("    content::RenderFrame* render_frame) {\n"
@@ -67,7 +71,7 @@ class HooksTest(unittest.TestCase):
     self.assertIn("  ISOLATED_WORLD_ID_UMBRA_PRELOAD,", ids)
 
     gn = read(self.src, "chrome/browser/BUILD.gn")
-    browser_block = gn.split('static_library("browser")', 1)[1].split(
+    browser_block = gn.split('source_set("browser")', 1)[1].split(
         'source_set("other")', 1)[0]
     self.assertIn('    "//umbra/app",\n    "//umbra/browser",', browser_block)
     # Must land in deps of the right target, not "other".
@@ -84,10 +88,18 @@ class HooksTest(unittest.TestCase):
     self.assertIn('"//umbra/tor_core:runtime_assets"', java)
     self.assertNotIn("umbra", agn.split('android_library("chrome_java")', 1)[0])
 
+    media_h = read(self.src,
+                   "third_party/blink/renderer/platform/media/"
+                   "multi_buffer_data_source.h")
+    self.assertIn('"SrcMediaMultiBufferPreloadSeconds",'
+                  "  // [umbra] media-buffer\n"
+                  "                                           0, 60, 60};",
+                  media_h)
+    self.assertIn('"SrcMediaMultiBufferKeepAfterPlaybackSeconds", 0, 2, 60}',
+                  media_h)  # untouched
     media = read(self.src,
                  "third_party/blink/renderer/platform/media/"
                  "multi_buffer_data_source.cc")
-    self.assertIn("kTargetSecondsBufferedAhead = 60;", media)
     self.assertIn("kMaxBufferPreload = 200 << 20;", media)
     self.assertIn("kMinBufferPreload = 2 << 20;", media)  # untouched
 

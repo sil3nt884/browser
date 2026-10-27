@@ -34,6 +34,15 @@ constexpr char kAlternateErrorPagesEnabled[] = "alternate_error_pages.enabled";
 // prefs::kWebRTCIPHandlingPolicy
 constexpr char kWebRtcIpHandlingPolicy[] = "webrtc.ip_handling_policy";
 
+// PDF and printing are switched off here rather than with enable_pdf /
+// enable_printing: since M157 desktop Chrome's UI depends on both
+// unconditionally, so the GN args no longer build on Windows.
+// prefs::kPluginsAlwaysOpenPdfExternally: PDFs download, never render.
+constexpr char kAlwaysOpenPdfExternally[] =
+    "plugins.always_open_pdf_externally";
+// prefs::kPrintingEnabled
+constexpr char kPrintingEnabled[] = "printing.enabled";
+
 void SetIfRegistered(PrefRegistry* registry,
                      std::string_view name,
                      base::Value value) {
@@ -60,6 +69,8 @@ void OverrideProfilePrefDefaults(PrefRegistry* registry) {
   SetIfRegistered(registry, kAlternateErrorPagesEnabled, base::Value(false));
   SetIfRegistered(registry, kWebRtcIpHandlingPolicy,
                   base::Value("disable_non_proxied_udp"));
+  SetIfRegistered(registry, kAlwaysOpenPdfExternally, base::Value(true));
+  SetIfRegistered(registry, kPrintingEnabled, base::Value(false));
 }
 
 }  // namespace umbra

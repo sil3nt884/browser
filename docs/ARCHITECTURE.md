@@ -12,9 +12,10 @@
 │             --host-resolver-rules=MAP * ~NOTFOUND ...           │
 │             --disable-quic  --force-webrtc-ip-handling-policy   │
 │                                                                 │
-│ RegisterUserProfilePrefs()                                      │
+│ RegisterProfilePrefs()  (pref_service_builder_utils.cc)         │
 │   └─ umbra::OverrideProfilePrefDefaults()     [hook: prefs]     │
-│        forced incognito (RAM-only cache), no search suggest ... │
+│        forced incognito (RAM-only cache), no search suggest,    │
+│        PDFs download instead of render, printing off ...        │
 └─────────────────────────────────────────────────────────────────┘
           │ network service process: plain Chromium net stack,
           │ every socket → SOCKS5 → umbra_tor → Tor network

@@ -1,0 +1,3 @@
+# Windows batch files need CRLF; the Gradle wrapper script needs LF.
+*.bat text eol=crlf
+remote/android/gradlew text eol=lf

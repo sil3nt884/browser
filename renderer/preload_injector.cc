@@ -6,14 +6,17 @@
 #include <string>
 
 #include "base/command_line.h"
+#include "base/functional/bind.h"
 #include "base/strings/string_util.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chrome/common/chrome_isolated_world_ids.h"
 #include "content/public/renderer/render_frame.h"
+#include "third_party/blink/public/platform/task_type.h"
+#include "third_party/blink/public/platform/web_isolated_world_info.h"
 #include "third_party/blink/public/platform/web_security_origin.h"
 #include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/public/platform/web_url.h"
 #include "third_party/blink/public/web/web_document.h"
-#include "third_party/blink/public/web/web_isolated_world_info.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "third_party/blink/public/web/web_script_source.h"
 #include "umbra/common/umbra_switches.h"
@@ -38,7 +41,7 @@ void EnsureWorldInfo() {
   blink::WebIsolatedWorldInfo info;
   info.security_origin = blink::WebSecurityOrigin::Create(
       GURL("chrome://umbra-preload/"));
-  info.human_readable_name = blink::WebString::FromUTF8("Umbra preload");
+  info.human_readable_name = blink::WebString::FromUtf8("Umbra preload");
   blink::SetIsolatedWorldInfo(kWorldId, info);
 }
 
@@ -77,6 +80,13 @@ PreloadInjector::PreloadInjector(content::RenderFrame* render_frame,
 PreloadInjector::~PreloadInjector() = default;
 
 void PreloadInjector::DidDispatchDOMContentLoadedEvent() {
+  render_frame()
+      ->GetTaskRunner(blink::TaskType::kInternalDefault)
+      ->PostTask(FROM_HERE, base::BindOnce(&PreloadInjector::Inject,
+                                           weak_factory_.GetWeakPtr()));
+}
+
+void PreloadInjector::Inject() {
   blink::WebLocalFrame* frame = render_frame()->GetWebFrame();
   if (!frame) {
     return;
@@ -88,7 +98,7 @@ void PreloadInjector::DidDispatchDOMContentLoadedEvent() {
   EnsureWorldInfo();
   const std::string script = BuildScript(enable_preload_, enable_video_);
   frame->ExecuteScriptInIsolatedWorld(
-      kWorldId, blink::WebScriptSource(blink::WebString::FromUTF8(script)),
+      kWorldId, blink::WebScriptSource(blink::WebString::FromUtf8(script)),
       blink::BackForwardCacheAware::kAllow);
 }
 

@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Umbra Remote</title>
+<style>
+  :root { --bg: #111015; --bar: #1c1a24; --fg: #ece9f5; --dim: #8f8aa3; --accent: #8a5cf6; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 15px system-ui, sans-serif; overflow: hidden; overscroll-behavior: none; }
+  body { display: flex; flex-direction: column; }
+  #bar { display: flex; align-items: center; gap: 4px; padding: 6px; background: var(--bar);
+    position: relative; flex: none; }
+  #bar button { flex: none; width: 38px; height: 38px; border: 0; border-radius: 19px;
+    background: transparent; color: var(--fg); font-size: 19px; line-height: 1; padding: 0; }
+  #bar button:active { background: #2c2938; }
+  #bar button.on { color: var(--accent); }
+  #urlform { flex: 1; min-width: 0; margin: 0; }
+  #url { width: 100%; height: 38px; border: 0; border-radius: 19px; padding: 0 14px;
+    background: #2a2734; color: var(--fg); font-size: 15px; outline: none; }
+  #url:focus { box-shadow: 0 0 0 2px var(--accent); }
+  #progress { position: absolute; left: 0; bottom: 0; height: 2px; width: 0; background: var(--accent);
+    transition: width .4s ease, opacity .3s; opacity: 0; }
+  #progress.on { width: 85%; opacity: 1; transition: width 8s cubic-bezier(.1,.7,.2,1); }
+  #stage { flex: 1; position: relative; min-height: 0; }
+  #screen { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
+  #overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--dim); text-align: center; padding: 24px; pointer-events: none; }
+  #kb { position: fixed; left: -1000px; top: 0; width: 10px; height: 10px; opacity: 0; }
+  #menu { position: absolute; right: 6px; top: 50px; z-index: 5; background: var(--bar); border-radius: 12px;
+    padding: 6px; display: none; box-shadow: 0 8px 24px #0008; min-width: 210px; }
+  #menu.open { display: block; }
+  #menu button, #menu label { display: flex; align-items: center; gap: 10px; width: 100%; padding: 11px 12px;
+    border: 0; background: none; color: var(--fg); font: inherit; text-align: left; border-radius: 8px; }
+  #menu button:active { background: #2c2938; }
+  #menu .row { display: flex; gap: 4px; padding: 4px 8px 8px; }
+  #menu .row button { justify-content: center; padding: 8px 0; background: #2a2734; }
+  #menu .row button.on { background: var(--accent); }
+  #menu small { color: var(--dim); padding: 4px 12px 0; display: block; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="back" aria-label="Back">&#8592;</button>
+  <form id="urlform" autocomplete="off"><input id="url" type="text" inputmode="url" enterkeyhint="go"
+    spellcheck="false" autocapitalize="off" placeholder="Search or type a URL"></form>
+  <button id="reload" aria-label="Reload">&#8635;</button>
+  <button id="kbbtn" aria-label="Keyboard">&#9000;</button>
+  <button id="menubtn" aria-label="Menu">&#8942;</button>
+  <div id="progress"></div>
+  <div id="menu">
+    <button id="fwd">&#8594;&nbsp; Forward</button>
+    <label><input type="checkbox" id="desktop"> Desktop site</label>
+    <small>Picture quality</small>
+    <div class="row" id="quality">
+      <button data-q="45">Low</button><button data-q="70">Medium</button><button data-q="88">High</button>
+    </div>
+    <button id="identity">New Tor identity</button>
+    <button id="restartAgent">Restart PC agent</button>
+    <button id="server" hidden>Change PC address</button>
+  </div>
+</div>
+<div id="stage">
+  <canvas id="screen"></canvas>
+  <div id="overlay">Connecting to your PC…</div>
+</div>
+<textarea id="kb" autocapitalize="sentences" autocomplete="off" spellcheck="true" aria-hidden="true"></textarea>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const canvas = $("screen"), ctx = canvas.getContext("2d"), overlay = $("overlay");
+const app = window.UmbraApp; // set by the Android app; absent in a plain browser
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+let ws = null, vp = { w: 0, h: 0 }, gotFrame = false, drawing = false, replaced = false;
+let mobile = !store.get("desktop", false), quality = store.get("quality", 70);
+
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function say(text) { overlay.textContent = text; overlay.style.display = text ? "flex" : "none"; }
+
+function hello() {
+  const r = canvas.getBoundingClientRect();
+  vp = { w: Math.round(r.width), h: Math.round(r.height) };
+  send({ t: "hello", w: vp.w, h: vp.h, dpr: window.devicePixelRatio || 1, mobile, quality });
+}
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => { say(gotFrame ? "" : "Waiting for the page… (Tor can take a few seconds)"); hello(); };
+  ws.onclose = () => {
+    if (replaced) return say("Umbra is open on another device. Tap here to use it on this one.");
+    say("Lost the PC. Reconnecting…");
+    setTimeout(connect, 2000);
+  };
+  ws.onmessage = (e) => {
+    if (typeof e.data !== "string") {
+      const kind = new Uint8Array(e.data, 0, 1)[0];
+      if (kind === 1) return frame(e.data.slice(1));
+      if (kind === 2) return sound(e.data.slice(1));
+      return;
+    }
+    const m = JSON.parse(e.data);
+    if (m.t === "audio") {
+      audioFmt = m;
+    } else if (m.t === "meta") {
+      if (document.activeElement !== $("url")) $("url").value = m.url.startsWith("chrome:") ? "" : m.url;
+      document.title = m.title || "Umbra Remote";
+    } else if (m.t === "load") {
+      $("progress").classList.toggle("on", m.on);
+    } else if (m.t === "vp") {
+      vp = { w: m.w, h: m.h };
+    } else if (m.t === "kbd") {
+      if (m.on) showKeyboard(); else if (document.activeElement === kb) hideKeyboard();
+    } else if (m.t === "dialog") {
+      dialog(m);
+    } else if (m.t === "bye") {
+      replaced = true;
+    }
+  };
+}
+
+async function frame(buf) {
+  if (drawing) return; // the agent sends one frame per ack, so this is rare
+  drawing = true;
+  try {
+    const bmp = await createImageBitmap(new Blob([buf], { type: "image/jpeg" }));
+    if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+      canvas.width = bmp.width; canvas.height = bmp.height;
+    }
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+    if (!gotFrame) { gotFrame = true; say(""); }
+  } catch {}
+  drawing = false;
+  send({ t: "ack" });
+}
+
+// ---- sound -------------------------------------------------------------
+// 20 ms chunks of s16le, queued back to back on a Web Audio clock with a
+// small cushion against Wi-Fi jitter. Browsers only allow sound after a
+// tap, so the context is resumed on the first touch.
+let audioFmt = { rate: 48000, ch: 2 }, actx = null, playAt = 0;
+const audioStats = { chunks: 0, peak: 0 };
+function sound(buf) {
+  const pcm = new Int16Array(buf), ch = audioFmt.ch, n = pcm.length / ch;
+  audioStats.chunks++;
+  for (let i = 0; i < pcm.length; i += 16) audioStats.peak = Math.max(audioStats.peak, Math.abs(pcm[i]) / 32768);
+  if (!actx || actx.state !== "running") return;
+  const b = actx.createBuffer(ch, n, audioFmt.rate);
+  for (let c = 0; c < ch; c++) {
+    const out = b.getChannelData(c);
+    for (let i = 0; i < n; i++) out[i] = pcm[i * ch + c] / 32768;
+  }
+  const src = actx.createBufferSource();
+  src.buffer = b;
+  src.connect(actx.destination);
+  const now = actx.currentTime;
+  if (playAt < now + 0.02 || playAt > now + 0.5) playAt = now + 0.08; // (re)start or drop lag
+  src.start(playAt);
+  playAt += b.duration;
+}
+function unlockAudio() {
+  if (!actx) actx = new AudioContext({ sampleRate: audioFmt.rate });
+  if (actx.state !== "running") actx.resume();
+}
+window.addEventListener("pointerdown", unlockAudio, true);
+
+function dialog(m) {
+  setTimeout(() => {
+    if (m.type === "alert" || m.type === "beforeunload") { alert(m.message); send({ t: "dialog", accept: true }); }
+    else if (m.type === "confirm") send({ t: "dialog", accept: confirm(m.message) });
+    else { const v = prompt(m.message, m.value || ""); send({ t: "dialog", accept: v !== null, text: v || "" }); }
+  }, 0);
+}
+
+// ---- touch -------------------------------------------------------------
+const pts = new Map();
+let moveQueued = false;
+function toPage(e) {
+  const r = canvas.getBoundingClientRect();
+  const w = vp.w || r.width, h = vp.h || r.height;
+  return [Math.round((e.clientX - r.left) * w / r.width * 10) / 10,
+          Math.round((e.clientY - r.top) * h / r.height * 10) / 10];
+}
+function points() { return [...pts.entries()].map(([id, p]) => [p[0], p[1], id]); }
+canvas.addEventListener("pointerdown", (e) => {
+  closeMenu();
+  if (replaced) { replaced = false; say("Connecting to your PC…"); connect(); return; }
+  canvas.setPointerCapture(e.pointerId);
+  pts.set(e.pointerId, toPage(e));
+  send({ t: "touch", k: "start", p: points() });
+  e.preventDefault();
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (!pts.has(e.pointerId)) return;
+  pts.set(e.pointerId, toPage(e));
+  if (!moveQueued) {
+    moveQueued = true;
+    requestAnimationFrame(() => { moveQueued = false; if (pts.size) send({ t: "touch", k: "move", p: points() }); });
+  }
+});
+function lift(e, k) {
+  if (!pts.has(e.pointerId)) return;
+  pts.delete(e.pointerId);
+  send({ t: "touch", k, p: k === "cancel" ? [] : points() });
+}
+canvas.addEventListener("pointerup", (e) => lift(e, "end"));
+canvas.addEventListener("pointercancel", (e) => lift(e, "cancel"));
+canvas.addEventListener("wheel", (e) => {
+  const [x, y] = toPage(e);
+  send({ t: "wheel", x, y, dx: e.deltaX, dy: e.deltaY });
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// ---- keyboard ----------------------------------------------------------
+// The soft keyboard types into a hidden textarea; every change is diffed
+// and replayed on the page as Backspaces + inserted text. A sentinel keeps
+// one character in the box so Backspace always produces an input event.
+const kb = $("kb"), SENT = "  ";
+let last = SENT;
+kb.value = SENT;
+function resetKb() { kb.value = SENT; last = SENT; kb.setSelectionRange(SENT.length, SENT.length); }
+kb.addEventListener("input", (e) => {
+  const now = kb.value;
+  let i = 0;
+  while (i < last.length && i < now.length && last[i] === now[i]) i++;
+  for (let n = last.length - i; n > 0; n--) send({ t: "key", key: "Backspace" });
+  if (now.length > i) send({ t: "text", s: now.slice(i).replace(/\n/g, "") });
+  if (now.includes("\n")) { send({ t: "key", key: "Enter" }); resetKb(); return; }
+  last = now;
+  if (!e.isComposing && (now.length > 80 || !now.startsWith(SENT))) resetKb();
+});
+kb.addEventListener("keydown", (e) => {
+  const special = ["Enter", "Tab", "Escape", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Delete"];
+  if (special.includes(e.key) && !e.isComposing) {
+    send({ t: "key", key: e.key });
+    e.preventDefault();
+  }
+});
+function showKeyboard() {
+  resetKb();
+  kb.focus({ preventScroll: true });
+  if (app) app.showKeyboard();
+  $("kbbtn").classList.add("on");
+}
+function hideKeyboard() {
+  kb.blur();
+  if (app) app.hideKeyboard();
+  $("kbbtn").classList.remove("on");
+}
+kb.addEventListener("blur", () => $("kbbtn").classList.remove("on"));
+$("kbbtn").addEventListener("click", () => document.activeElement === kb ? hideKeyboard() : showKeyboard());
+
+// ---- bar & menu --------------------------------------------------------
+window.umbraBack = () => send({ t: "back" }); // the Android back button
+$("back").onclick = () => send({ t: "back" });
+$("fwd").onclick = () => { send({ t: "fwd" }); closeMenu(); };
+$("reload").onclick = () => send({ t: "reload" });
+// Select the whole address on the first tap, like a phone browser. The
+// mouseup that follows focus would otherwise drop the selection again.
+let urlJustFocused = false;
+$("url").addEventListener("focus", () => { urlJustFocused = true; $("url").select(); });
+$("url").addEventListener("mouseup", (e) => { if (urlJustFocused) { e.preventDefault(); urlJustFocused = false; } });
+$("url").addEventListener("blur", () => { urlJustFocused = false; });
+$("urlform").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const v = $("url").value.trim();
+  if (v) send({ t: "nav", url: v });
+  $("url").blur();
+});
+function closeMenu() { $("menu").classList.remove("open"); }
+$("menubtn").onclick = () => $("menu").classList.toggle("open");
+$("desktop").checked = !mobile;
+$("desktop").onchange = () => { mobile = !$("desktop").checked; store.set("desktop", !mobile); hello(); closeMenu(); };
+for (const b of document.querySelectorAll("#quality button")) {
+  b.classList.toggle("on", +b.dataset.q === quality);
+  b.onclick = () => {
+    quality = +b.dataset.q; store.set("quality", quality);
+    for (const o of document.querySelectorAll("#quality button")) o.classList.toggle("on", o === b);
+    hello();
+  };
+}
+$("identity").onclick = () => { send({ t: "new_identity" }); closeMenu(); say("Getting a new Tor identity…"); gotFrame = false; };
+$("restartAgent").onclick = () => { send({ t: "restart_agent" }); closeMenu(); };
+if (app) { $("server").hidden = false; $("server").onclick = () => app.changeServer(); }
+
+let resizeTimer = 0;
+new ResizeObserver(() => { clearTimeout(resizeTimer); resizeTimer = setTimeout(hello, 150); }).observe(canvas);
+connect();
+</script>
+</body>
+</html>

@@ -30,6 +30,13 @@ futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 
+# saturating-time 0.5.0 (via tor-netdoc) loops forever on Windows when it
+# probes for SystemTime::MIN: 1ns steps "succeed" without moving a 100ns clock.
+# That hung Arti on the first consensus it parsed (bootstrap stuck at 15%).
+# Patched copy; drop this once upstream ships a fix.
+[patch.crates-io]
+saturating-time = { path = "third_party/saturating-time" }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "test-util"] }
 

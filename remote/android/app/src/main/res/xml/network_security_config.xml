@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The agent speaks plain HTTP/WebSocket on the home network. Pages
+     themselves are fetched by the PC over Tor; only pixels, input and sound
+     cross the Wi-Fi. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

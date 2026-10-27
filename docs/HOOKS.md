@@ -25,10 +25,14 @@ network context exists. Any function that runs early in the browser process,
 before `content::ContentMain` creates the network service, will do.
 
 ## prefs
-`chrome/browser/prefs/browser_prefs.cc`, right after
-`RegisterProfilePrefs(registry, locale);` in `RegisterUserProfilePrefs`.
+`chrome/browser/profiles/pref_service_builder_utils.cc`, end of
+`RegisterProfilePrefs(bool is_signin_profile, ...)`, right after
+`BrowserContextDependencyManager::...RegisterProfilePrefsForServices()`.
 Changes pref *defaults*. It needs the prefs to be registered already; any
-point after registration works. Unknown pref names are logged and skipped.
+point after registration works. It used to sit in `browser_prefs.cc`, but
+that runs before keyed services register theirs (e.g.
+`plugins.always_open_pdf_externally`), so those were skipped. Unknown pref
+names are logged and skipped.
 
 ## renderer
 `chrome/renderer/chrome_content_renderer_client.cc`, start of
@@ -42,7 +46,8 @@ It must come before the extensions entry, because extension world IDs count
 up from that value.
 
 ## browser-deps / renderer-deps
-`chrome/browser/BUILD.gn` (`static_library("browser")`) and
+`chrome/browser/BUILD.gn` (`source_set("browser")` since M157,
+`static_library` before) and
 `chrome/renderer/BUILD.gn` (`static_library("renderer")`): adds
 `//umbra/app`, `//umbra/browser` and `//umbra/renderer` to `deps`.
 
@@ -52,11 +57,13 @@ Pulls in `//umbra/tor_core:runtime_assets`, which packages
 `libumbra_tor.so` uncompressed at `assets/umbra/`. Any Java target that ends
 up in `chrome_public_apk` would work.
 
-## media-buffer (optional)
-`third_party/blink/renderer/platform/media/multi_buffer_data_source.cc`.
-Raises `kTargetSecondsBufferedAhead` (10 → 60) and `kMaxBufferPreload`
-(50 → 200 MB) for progressive video. If it's missing, video still works with
-stock buffering.
+## media-buffer / media-buffer-cap (optional)
+`third_party/blink/renderer/platform/media/multi_buffer_data_source.h` and
+`.cc`. For progressive video, raises the default of the
+`preload_seconds_` Tuneable (`SrcMediaMultiBufferPreloadSeconds`, 10 → 60 s,
+which is its own max) and `kMaxBufferPreload` (50 → 200 MB). Before M157 the
+seconds target was `kTargetSecondsBufferedAhead` in the `.cc`. If either is
+missing, video still works with stock buffering.
 
 ## win-installer (optional, Windows only)
 `chrome/installer/mini_installer/chrome.release`. Ships `umbra_tor.dll` in
