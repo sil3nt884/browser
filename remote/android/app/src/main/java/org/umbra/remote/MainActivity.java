@@ -54,6 +54,7 @@ public final class MainActivity extends Activity
     private static final String PREF_QUALITY = "quality";
     private static final String PREF_FULLSCREEN = "fullscreen";
     private static final String PREF_LOCK_ROTATION = "lock_rotation";
+    private static final String PREF_SMOOTH = "smooth";
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService decoder = Executors.newSingleThreadExecutor();
@@ -67,6 +68,8 @@ public final class MainActivity extends Activity
     private SurfaceView videoView;
     /** The video stream's size in pixels (0 while not streaming video). */
     private int videoW, videoH;
+    /** The screen's refresh rate, as asked for (pictures come at it). */
+    private float hz = 60;
     private EditText url;
     private ProgressBar progress;
     private TextView status;
@@ -95,9 +98,16 @@ public final class MainActivity extends Activity
         screen = findViewById(R.id.screen);
         videoView = findViewById(R.id.video);
         video = new VideoDecoder(this);
+        video.setSmooth(prefs.getBoolean(PREF_SMOOTH, false));
+        hz = fastestRefresh();
         videoView.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder h) {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    // Keep the panel at the stream's rate instead of letting
+                    // it drop to 60 Hz for "video".
+                    h.getSurface().setFrameRate(hz, android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+                }
                 video.setSurface(h.getSurface());
             }
 
@@ -142,6 +152,28 @@ public final class MainActivity extends Activity
             }
             return false;
         });
+    }
+
+    /**
+     * Asks for the display's fastest refresh rate at its current resolution
+     * (phones otherwise often sit at 60 Hz), and returns it: the agent sends
+     * pictures at this rate.
+     */
+    @SuppressWarnings("deprecation")
+    private float fastestRefresh() {
+        android.view.Display d = Build.VERSION.SDK_INT >= 30 ? getDisplay() : getWindowManager().getDefaultDisplay();
+        if (d == null) return 60;
+        android.view.Display.Mode cur = d.getMode(), best = cur;
+        for (android.view.Display.Mode m : d.getSupportedModes()) {
+            if (m.getPhysicalWidth() == cur.getPhysicalWidth() && m.getPhysicalHeight() == cur.getPhysicalHeight()
+                    && m.getRefreshRate() > best.getRefreshRate()) {
+                best = m;
+            }
+        }
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.preferredDisplayModeId = best.getModeId();
+        getWindow().setAttributes(lp);
+        return best.getRefreshRate();
     }
 
     /**
@@ -359,7 +391,8 @@ public final class MainActivity extends Activity
                 "sh", Math.round(sh / d),
                 "dpr", d,
                 "mobile", !prefs.getBoolean(PREF_DESKTOP, false),
-                "quality", prefs.getInt(PREF_QUALITY, 70));
+                "quality", prefs.getInt(PREF_QUALITY, 70),
+                "hz", Math.round(hz));
     }
 
     @Override
@@ -604,6 +637,8 @@ public final class MainActivity extends Activity
         m.add(0, 5, 3, R.string.full_screen).setCheckable(true).setChecked(fullscreen);
         m.add(0, 6, 4, R.string.lock_rotation).setCheckable(true)
                 .setChecked(prefs.getBoolean(PREF_LOCK_ROTATION, false));
+        m.add(0, 10, 4, R.string.smooth_motion).setCheckable(true)
+                .setChecked(prefs.getBoolean(PREF_SMOOTH, false));
         m.add(0, 7, 5, R.string.new_identity);
         m.add(0, 8, 6, R.string.restart_agent);
         m.add(0, 4, 7, R.string.change_pc);
@@ -623,6 +658,10 @@ public final class MainActivity extends Activity
                 confirm(R.string.restart_agent, R.string.restart_agent_message, () -> conn.send("restart_agent"));
             } else if (id == 9) {
                 newTab();
+            } else if (id == 10) {
+                boolean on = !item.isChecked();
+                prefs.edit().putBoolean(PREF_SMOOTH, on).apply();
+                video.setSmooth(on);
             } else if (id == 1) {
                 conn.send("fwd");
             } else if (id == 2) {

@@ -64,6 +64,15 @@ WebView, OkHttp WebSocket, AudioTrack), built in WSL via `setup-sdk.sh` /
   UDP path has not run on a phone. Sockets must stay non-inheritable: the
   agent starts Umbra, which otherwise keeps UDP 7777 after an agent restart.
   UDP needs its own firewall rule (the user adds it).
+- v0.7: capture every composited frame, encode at the phone's refresh rate
+  (hello.hz), first change after a still moment at once; Moonlight's decoder
+  settings with fallback tiers; "Smooth motion" pacing option. NVENC's SPS
+  already has max_num_reorder_frames 0, so no SPS patch. v0.8: finger-locked
+  scrolling (shifting the picture by the finger's travel since the touch each
+  frame showed) was tried in 0.7 and removed: on the phone it looked jumpy.
+  Tap timing on loopback swings 13-30 ms between runs (Chrome), too noisy to
+  A/B small changes; run tests from the Bash tool (PowerShell runs couldn't
+  bind the UDP test ports).
 - Auto-mode's safety classifier was flaky ("no verdict"); the user added
   `.claude/settings.local.json` allowing only: cargo build/test of
   remote/agent (with `--manifest-path C:/me-tor/umbra/remote/agent/Cargo.toml`),

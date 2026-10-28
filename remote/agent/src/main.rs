@@ -98,7 +98,8 @@ fn main() {
   }
   if raw.get(1).map(String::as_str) == Some("--udp-test") && raw.len() >= 4 {
     let drop = raw.get(4).and_then(|d| d.parse().ok()).unwrap_or(0);
-    return net::phone_test(&raw[2], raw[3].parse().unwrap_or(5), drop);
+    let hz = raw.get(5).and_then(|d| d.parse().ok()).unwrap_or(60);
+    return net::phone_test(&raw[2], raw[3].parse().unwrap_or(5), drop, hz);
   }
   let args = parse_args();
   log!("starting; chrome = {}", args.chrome.display());

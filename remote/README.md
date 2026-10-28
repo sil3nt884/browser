@@ -56,6 +56,9 @@ The protocol is documented at the top of `agent/src/hub.rs`.
   identity** (restarts Umbra on the PC with new circuits, so a new exit
   address, and reopens the page), **Restart PC agent** (Umbra keeps running),
   Change PC address.
+- **Smooth motion** (menu): shows one frame per screen refresh, holding up
+  to two back, which evens out Wi-Fi jitter for up to a refresh of extra
+  delay. Off (the default) shows each frame as soon as it's decoded.
 - Tapping a text field on the page brings up the keyboard; the back button
   goes back (or closes a tab a link opened).
 - **Pull down** at the top of a page to reload it (Chrome's own
@@ -79,12 +82,28 @@ Foundation; low-latency, constant bit rate, Baseline, no B-frames). The
 phone decodes it with its hardware decoder straight onto a SurfaceView. So:
 
 - the page is pixel for pixel at the phone's resolution (sharp text);
-- up to 60+ fps, ~1-10 Mbit/s, and a frame is never waited on: at most 4
-  are in flight, past that new pictures wait on the GPU, not in the Wi-Fi;
+- every frame Windows composites is captured (the monitor's rate), and the
+  newest is encoded at the phone's own refresh rate (the app asks for the
+  screen's fastest mode and reports it); the first change after a still
+  moment goes out at once, so a tap's answer waits at most one vsync;
+- ~1-10 Mbit/s, and a frame is never waited on: at most 4 are in flight,
+  past that new pictures wait on the GPU, not in the Wi-Fi;
 - after the page settles, the last picture is re-encoded a few times, so
   what a fast scroll blurred sharpens within a fraction of a second;
 - touches carry the phone's own timestamps, so flings have the speed of the
   finger, not of the Wi-Fi.
+
+For the smoothest motion, run the PC's display at the phone's refresh rate or
+a multiple of it (120 Hz suits 60 and 120 Hz phones): a 144 Hz display can't
+be divided into 60 or 120 evenly, so frames land unevenly. The agent logs a
+tip when they don't match.
+
+The phone decodes with Android's low-latency mode plus each chip maker's own
+setting (Qualcomm, Samsung Exynos, MediaTek, HiSilicon, Amlogic) and, on
+Qualcomm, the decoder clock at its maximum, the same settings Moonlight uses;
+if a decoder refuses them or fails soon after starting, it steps down to
+fewer. Frames are released "due now", so when two land in one refresh the
+newer one is shown instead of queueing behind the older.
 
 Measured on the PC (RTX 3060), tap to encoded frame: 16 ms median.
 `python -I agent/tools/fps_test.py 8 70 2.625 30` simulates a phone (frames,
@@ -194,7 +213,7 @@ output instead of the cable.
   what the PC's speakers are actually getting, handy for checking that Umbra
   is silent on the PC.
 
-## Limits (v0.6)
+## Limits (v0.8)
 
 - One viewer at a time. A second one takes over and the first shows "open on
   another device".

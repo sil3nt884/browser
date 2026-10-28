@@ -15,8 +15,11 @@
 //! (server.rs: JSON as text, the rest as binary). Same messages either way.
 //!
 //! Phone -> agent (JSON text):
-//!   hello {w, h, sw, sh, dpr, mobile, quality}   viewport and whole screen
-//!                                         in CSS px; resend on resize/rotate
+//!   hello {w, h, sw, sh, dpr, mobile, quality, hz}   viewport and whole
+//!                                         screen in CSS px; resend on
+//!                                         resize/rotate. hz = the screen's
+//!                                         refresh rate (pictures are sent
+//!                                         at it)
 //!   ack                                   frame shown (or lost on the way),
 //!                                         send the next one
 //!   idr                                   video decoder needs a keyframe
@@ -103,10 +106,12 @@ struct View {
   dpr: f64,
   mobile: bool,
   quality: i64,
+  /// The phone screen's refresh rate: pictures are sent at this rate.
+  hz: f64,
 }
 
 /// Until a phone says otherwise: a typical 6.3" Android phone (Pixel 8).
-const DEFAULT_VIEW: View = View { w: 412.0, h: 780.0, sw: 412.0, sh: 915.0, dpr: 2.625, mobile: true, quality: 70 };
+const DEFAULT_VIEW: View = View { w: 412.0, h: 780.0, sw: 412.0, sh: 915.0, dpr: 2.625, mobile: true, quality: 70, hz: 60.0 };
 
 enum Exit {
   Quit,
@@ -639,7 +644,8 @@ impl Hub {
       51..=75 => 10_000_000,
       _ => 18_000_000,
     };
-    let settings = video::Settings { width, height, bitrate, fps: 60, place: self.place };
+    let fps = self.view.hz.round() as u32;
+    let settings = video::Settings { width, height, bitrate, fps, place: self.place };
     self.video_in_flight.store(0, Ordering::Relaxed);
     if let Some(v) = &self.video {
       if v.hwnd == hwnd && v.settings == settings {
@@ -1033,6 +1039,7 @@ impl Hub {
       dpr: v["dpr"].as_f64().unwrap_or(DEFAULT_VIEW.dpr).clamp(1.0, 3.0),
       mobile: v["mobile"].as_bool().unwrap_or(true),
       quality: v["quality"].as_i64().unwrap_or(70).clamp(20, 95),
+      hz: v["hz"].as_f64().unwrap_or(60.0).clamp(30.0, 144.0),
     };
     self.phone_view = true;
     if (self.view.dpr - browser::phone_dpr().unwrap_or(0.0)).abs() > 0.001 {

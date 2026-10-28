@@ -217,7 +217,7 @@ fn writer(link: &Link, peer: u32, mut rx: mpsc::UnboundedReceiver<Message>) {
 /// it after), taps it to time tap -> picture, then runs an animation for
 /// frame rate, bit rate and losses. DROP throws away that many packets per
 /// thousand each way, to see recovery.
-pub fn phone_test(addr: &str, secs: u64, drop: u32) {
+pub fn phone_test(addr: &str, secs: u64, drop: u32, hz: u32) {
   use serde_json::{Value, json};
   // "ws://HOST:PORT" runs the same test over the WebSocket, for comparison.
   let link = if let Some(a) = addr.strip_prefix("ws://") {
@@ -246,7 +246,8 @@ pub fn phone_test(addr: &str, secs: u64, drop: u32) {
   if !open {
     return log!("udp-test: no answer from {addr}");
   }
-  send(json!({ "t": "hello", "w": 412, "h": 780, "sw": 412, "sh": 915, "dpr": 2.8125, "mobile": true, "quality": 70 }));
+  send(json!({ "t": "hello", "w": 412, "h": 780, "sw": 412, "sh": 915, "dpr": 2.8125, "mobile": true, "quality": 70,
+               "hz": hz }));
   let tap_page = "data:text/html,<body style='margin:0;height:100vh;background:%23000' \
     ontouchstart=\"this.style.background=this.style.background=='red'?'blue':'red'\">";
 

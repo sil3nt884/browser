@@ -9,9 +9,15 @@ $exe = Join-Path $here 'target\release\umbra-remote.exe'
 $dest = 'C:\UmbraBrowser\umbra-remote.exe'
 $dist = Join-Path $here '..\..\dist\umbra-remote.exe'
 
-Get-Process umbra-remote -ErrorAction SilentlyContinue | Where-Object Path -eq $dest | Stop-Process -Force
-Start-Sleep -Milliseconds 800
-Copy-Item $exe $dest -Force
+Get-Process umbra-remote -ErrorAction SilentlyContinue | Where-Object Path -eq $dest | Stop-Process -Force -PassThru |
+  Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+# The old exe can stay locked for a moment after its process ends (the
+# antivirus looks at it too): retry for a few seconds.
+for ($i = 0; ; $i++) {
+  try { Copy-Item $exe $dest -Force -ErrorAction Stop; break }
+  catch { if ($i -ge 20) { throw }; Start-Sleep -Milliseconds 500 }
+}
+New-Item -ItemType Directory -Force (Split-Path $dist) | Out-Null
 Copy-Item $exe $dist -Force
 # The agent serves the phone app at http://<PC>:7777/UmbraRemote.apk.
 $apk = Join-Path $here '..\..\dist\UmbraRemote.apk'

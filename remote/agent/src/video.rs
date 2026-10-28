@@ -9,6 +9,11 @@
 //! screencast that is a frame per vsync instead of per round trip, a tenth
 //! of the bytes, and the page at the phone's own pixel density.
 //!
+//! Every frame Windows composites is captured (the monitor's rate), and the
+//! newest goes to the encoder at the phone's refresh rate. The first change
+//! after a still moment goes out at once, so a tap's answer never waits for
+//! a slot.
+//!
 //! Output: Annex B access units, each prefixed with the protocol's kind
 //! byte (3), ready to go to the phone as one binary message.
 
@@ -125,7 +130,21 @@ pub fn start(
   };
   match ready_rx.recv_timeout(Duration::from_secs(10)) {
     Ok(Ok(name)) => {
-      log!("video: {}x{} at {} kbit/s on {name}", settings.width, settings.height, settings.bitrate / 1000);
+      let hz = display_hz();
+      log!(
+        "video: {}x{} at {} kbit/s, {} fps, on {name}; PC display {}",
+        settings.width,
+        settings.height,
+        settings.bitrate / 1000,
+        settings.fps,
+        hz.map_or("? Hz".to_string(), |h| format!("{h:.0} Hz"))
+      );
+      if let Some(h) = hz {
+        let (a, b) = (h.round() as u32, settings.fps);
+        if a % b != 0 && b % a != 0 {
+          log!("tip: set the PC display to {b} Hz (or a multiple) for the smoothest motion on the phone");
+        }
+      }
       Ok(Video { settings, hwnd, stop, key, rate, thread: Some(thread) })
     }
     Ok(Err(e)) => Err(e),
@@ -153,7 +172,7 @@ impl Pipeline {
     }
     let (dev, ctx) = device()?;
     let encoder = Encoder::new(&dev, settings)?;
-    let capture = Capture::new(&dev, hwnd, settings.fps)?;
+    let capture = Capture::new(&dev, hwnd)?;
     let convert = Converter::new(&dev, &ctx, settings.width, settings.height)?;
     Ok(Pipeline { ctx, capture, convert, encoder, hwnd, settings })
   }
@@ -226,11 +245,19 @@ impl Pipeline {
         full_since = None;
       }
       let want_key = key.load(Ordering::Relaxed);
+      // A new picture goes out once a phone frame has passed since the last
+      // (at once after a still moment); until then a newer one replaces it.
+      // 4/5 of a frame, so a display at exactly the phone's rate (or a
+      // multiple) lines up frame for frame despite timer jitter.
+      let due = last_fed.elapsed() >= frame_time * 4 / 5;
       if self.encoder.need > 0 && in_flight.load(Ordering::Relaxed) < FRAMES_IN_FLIGHT {
-        let pick = if let Some(t) = fresh.take() {
+        let pick = if fresh.is_some() && due {
           repeats = 3;
-          Some(t)
-        } else if (want_key || (repeats > 0 && last_fed.elapsed() > frame_time * 4)) && last.is_some() {
+          fresh.take()
+        } else if fresh.is_none()
+          && (want_key || (repeats > 0 && last_fed.elapsed() > frame_time * 4))
+          && last.is_some()
+        {
           repeats = repeats.saturating_sub(1);
           last.clone()
         } else {
@@ -285,7 +312,7 @@ struct Capture {
 }
 
 impl Capture {
-  fn new(dev: &ID3D11Device, hwnd: isize, fps: u32) -> Result<Capture> {
+  fn new(dev: &ID3D11Device, hwnd: isize) -> Result<Capture> {
     let winrt: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dev.cast::<IDXGIDevice>()?)? }.cast()?;
     let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
     let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(HWND(hwnd as _))? };
@@ -294,11 +321,11 @@ impl Capture {
     let session = pool.CreateCaptureSession(&item)?;
     let _ = session.SetIsBorderRequired(false);
     let _ = session.SetIsCursorCaptureEnabled(false);
-    // Windows delivers at most ~one image per 16.7 ms by default, which on a
-    // 144 Hz monitor rounds down to every third vsync (48 fps). Ask for a
-    // little more than the target rate so the encoder sees every frame.
-    let interval = 10_000_000 / (fps as i64 + fps as i64 / 4).max(1);
-    let _ = session.SetMinUpdateInterval(windows::Foundation::TimeSpan { Duration: interval });
+    // Windows delivers at most ~one image per 16.7 ms by default (every third
+    // vsync on a 144 Hz monitor). Ask for every one it composites: a change
+    // that just missed a capture then waits one vsync, not a whole frame of
+    // ours. run() picks which of them to encode.
+    let _ = session.SetMinUpdateInterval(windows::Foundation::TimeSpan { Duration: 10_000 });
     session.StartCapture()?;
     Ok(Capture { winrt, pool, _session: session, size })
   }
@@ -683,6 +710,15 @@ fn sequence_header(mft: &IMFTransform, out_id: u32) -> Vec<u8> {
     }
     v
   }
+}
+
+/// The refresh rate Windows composites at (the main display's).
+pub fn display_hz() -> Option<f64> {
+  use windows::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo};
+  let mut t = DWM_TIMING_INFO { cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32, ..Default::default() };
+  unsafe { DwmGetCompositionTimingInfo(HWND::default(), &mut t).ok()? };
+  let (n, d) = (t.rateRefresh.uiNumerator, t.rateRefresh.uiDenominator);
+  (n > 0 && d > 0).then(|| n as f64 / d as f64)
 }
 
 /// Whether an Annex B stream contains a NAL unit of this type.
