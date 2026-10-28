@@ -70,6 +70,16 @@ The protocol is documented at the top of `agent/src/hub.rs`.
 
 - When a page goes full screen (a video, a game) the app hides its toolbar
   and the system bars for as long; Back leaves full screen.
+- **Leaving the app pauses what's playing.** When the phone goes away (the
+  app in the background, or the Wi-Fi gone), the agent pauses every video
+  and sound playing in Umbra's tabs and frames, and plays them again when
+  the phone is back (only those it paused).
+- **Clearing the app from recent apps closes Umbra** on the PC (the agent
+  keeps running and starts a fresh Umbra the next time the phone connects).
+  Android only tells a running service when an app is cleared, so while the
+  app is around it keeps a foreground service, with a quiet notification
+  ("Clearing Umbra Remote from recent apps closes Umbra on the PC"). A force
+  stop sends nothing, and Umbra stays open.
 
 ## How the picture gets to the phone
 
@@ -205,7 +215,9 @@ output instead of the cable.
   `umbra-remote.exe --udp-test 127.0.0.1:7777 5 [loss per 1000]` plays a
   phone against the running agent in a tab of its own (closed after) and logs
   tap -> picture, fps and losses; `ws://127.0.0.1:7777` runs the same over the
-  WebSocket.
+  WebSocket. `--media-test 127.0.0.1:7777` checks pausing and resuming (see
+  the log), and `--udp-send 127.0.0.1:7777 '{"t":"close_umbra"}'` sends single
+  messages by hand.
 - `umbra-remote.exe --video-test C:\UmbraBrowser\chrome.exe 6 out.h264`
   encodes a test page in a throwaway Umbra window and logs fps and bit rate
   (to `%LOCALAPPDATA%\UmbraRemote\agent.log`).
@@ -213,7 +225,7 @@ output instead of the cable.
   what the PC's speakers are actually getting, handy for checking that Umbra
   is silent on the PC.
 
-## Limits (v0.8)
+## Limits (v0.9)
 
 - One viewer at a time. A second one takes over and the first shows "open on
   another device".

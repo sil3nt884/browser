@@ -294,6 +294,7 @@ public final class MainActivity extends Activity
         super.onStart();
         started = true;
         holdWifi(true);
+        ExitWatchService.start(this);
         if (address() == null) askAddress(false);
         else connect();
     }

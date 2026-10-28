@@ -70,6 +70,12 @@ WebView, OkHttp WebSocket, AudioTrack), built in WSL via `setup-sdk.sh` /
   already has max_num_reorder_frames 0, so no SPS patch. v0.8: finger-locked
   scrolling (shifting the picture by the finger's travel since the touch each
   frame showed) was tried in 0.7 and removed: on the phone it looked jumpy.
+- v0.9: media pauses when the phone leaves and resumes when it's back
+  (marked with a random property, main world); clearing the app from recents
+  sends close_umbra from a foreground service (onTaskRemoved; Android gives
+  no other signal, user chose this over adb/heartbeat) and the agent sleeps
+  until the next hello. Some of Windows' UDP ports (seen: 47811, 47900) are
+  held without a listed owner, so tests pick a free port.
   Tap timing on loopback swings 13-30 ms between runs (Chrome), too noisy to
   A/B small changes; run tests from the Bash tool (PowerShell runs couldn't
   bind the UDP test ports).

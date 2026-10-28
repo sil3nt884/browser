@@ -390,6 +390,113 @@ pub fn phone_test(addr: &str, secs: u64, drop: u32, hz: u32) {
   pump(Duration::from_millis(500), &mut c, &mut tab);
 }
 
+/// `umbra-remote.exe --udp-send HOST:PORT JSON...`: connects over UDP,
+/// sends each message, stays a second for the agent to act, and leaves.
+/// For trying single messages (close_umbra, a hello) by hand.
+pub fn send_test(addr: &str, messages: &[String]) {
+  let (host, port) = addr.rsplit_once(':').unwrap_or((addr, "7777"));
+  let Ok(link) = Link::connect(host, port.parse().unwrap_or(7777)) else { return log!("udp-send: bad address") };
+  let mut buf = vec![0u8; 8 << 20];
+  let start = Instant::now();
+  let mut open = false;
+  while !open && start.elapsed() < Duration::from_secs(3) {
+    open = matches!(link.poll(&mut buf, 10), Some(Event::Open { .. }));
+  }
+  if !open {
+    return log!("udp-send: no answer from {addr}");
+  }
+  for m in messages {
+    link.send(1, RELIABLE, m.as_bytes());
+  }
+  let until = Instant::now() + Duration::from_secs(1);
+  while Instant::now() < until {
+    let _ = link.poll(&mut buf, 10);
+  }
+  log!("udp-send: sent {} message(s)", messages.len());
+}
+
+/// `umbra-remote.exe --media-test HOST:PORT`: plays a phone that opens its
+/// own tab with a playing video, leaves (the agent should pause it), comes
+/// back (it should play again), and closes the tab. Results are in the
+/// agent's log ("paused", "resumed").
+pub fn media_test(addr: &str) {
+  use serde_json::{Value, json};
+  let (host, port) = addr.rsplit_once(':').unwrap_or((addr, "7777"));
+  let port: u16 = port.parse().unwrap_or(7777);
+  let hello = json!({ "t": "hello", "w": 412, "h": 780, "sw": 412, "sh": 915, "dpr": 2.8125, "mobile": true, "quality": 70, "hz": 60 });
+  let page = "data:text/html,<body style='margin:0;height:100vh' ontouchend='v.play()'><video id=v muted playsinline></video>\
+    <canvas id=c width=64 height=64></canvas><script>\
+    const x=c.getContext('2d');let n=0;(function f(){x.fillStyle='hsl('+(n++%360)+',80%,50%)';x.fillRect(0,0,64,64);\
+    requestAnimationFrame(f)})();v.srcObject=c.captureStream(30);</script>";
+  let mut buf = vec![0u8; 8 << 20];
+  // One visit: connect, hello, run `act` with a way to send and to wait.
+  let mut visit = |act: &mut dyn FnMut(&dyn Fn(Value), &mut dyn FnMut(Duration) -> Option<String>)| {
+    let Ok(link) = Link::connect(host, port) else { return };
+    let start = Instant::now();
+    let mut open = false;
+    while !open && start.elapsed() < Duration::from_secs(3) {
+      open = matches!(link.poll(&mut buf, 10), Some(Event::Open { .. }));
+    }
+    if !open {
+      return log!("media-test: no answer from {addr}");
+    }
+    let send = |v: Value| {
+      let _ = link.send(1, RELIABLE, v.to_string().as_bytes());
+    };
+    send(hello.clone());
+    let mut current = None;
+    let mut wait = |d: Duration| {
+      let until = Instant::now() + d;
+      while Instant::now() < until {
+        match link.poll(&mut buf, 5) {
+          Some(Event::Message { channel: RELIABLE, data, .. }) => {
+            let v: Value = serde_json::from_slice(&data).unwrap_or_default();
+            if v["t"] == "tabs" {
+              current = v["current"].as_str().map(String::from);
+            }
+          }
+          Some(Event::Message { channel: FRAMES, .. }) => {
+            let _ = link.send(1, RELIABLE, br#"{"t":"ack"}"#);
+          }
+          _ => {}
+        }
+      }
+      current.clone()
+    };
+    act(&send, &mut wait);
+  };
+  let mut tab = None;
+  visit(&mut |send, wait| {
+    send(json!({ "t": "tabs" }));
+    let theirs = wait(Duration::from_secs(2));
+    send(json!({ "t": "new_tab" }));
+    wait(Duration::from_secs(2));
+    send(json!({ "t": "tabs" }));
+    let ours = wait(Duration::from_millis(500));
+    if ours.is_none() || ours == theirs {
+      return log!("media-test: no new tab of our own; not touching yours");
+    }
+    send(json!({ "t": "nav", "url": page }));
+    wait(Duration::from_secs(3));
+    // Start it with a tap, like a person would (autoplay rules).
+    send(json!({ "t": "touch", "k": "start", "p": [[200, 400, 0]], "ts": 1000.0 }));
+    send(json!({ "t": "touch", "k": "end", "p": [], "ts": 1050.0 }));
+    wait(Duration::from_secs(2));
+    tab = ours;
+    log!("media-test: video playing in our tab; leaving");
+  });
+  if tab.is_none() {
+    return;
+  }
+  std::thread::sleep(Duration::from_secs(2));
+  visit(&mut |send, wait| {
+    log!("media-test: back");
+    wait(Duration::from_secs(3));
+    send(json!({ "t": "close_tab", "id": tab }));
+    wait(Duration::from_millis(500));
+  });
+}
+
 /// The test phone's connection: UDP, or the WebSocket for comparison.
 enum TestLink {
   Udp(Link),
@@ -431,8 +538,14 @@ impl TestLink {
 mod tests {
   use super::*;
 
-  fn pair(port: u16) -> (Link, Link, u32) {
-    let server = Link::listen(port).expect("listen");
+  /// A server on the first free port from `from` (Windows can hold whole
+  /// ranges for itself, e.g. for WSL, so no fixed port is safe).
+  fn listen_free(from: u16) -> (Link, u16) {
+    (from..from + 2000).step_by(7).find_map(|p| Link::listen(p).ok().map(|l| (l, p))).expect("a free UDP port")
+  }
+
+  fn pair(from: u16) -> (Link, Link, u32) {
+    let (server, port) = listen_free(from);
     let client = Link::connect("127.0.0.1", port).expect("connect");
     let mut buf = vec![0u8; 1 << 20];
     let mut peer = None;
@@ -451,7 +564,7 @@ mod tests {
 
   #[test]
   fn reliable_survives_loss() {
-    let (server, client, _) = pair(47811);
+    let (server, client, _) = pair(20011);
     client.set_drop(100);
     server.set_drop(100);
     for i in 0..300 {
@@ -472,7 +585,7 @@ mod tests {
 
   #[test]
   fn frames_arrive_whole_or_are_reported_lost() {
-    let (server, client, peer) = pair(47812);
+    let (server, client, peer) = pair(22012);
     server.set_drop(10);
     let sent = 200u32;
     let mut buf = vec![0u8; 1 << 20];
@@ -513,7 +626,7 @@ mod tests {
   /// one should cost a few ms (fast resend), not TCP's 200+ ms.
   #[test]
   fn resends_are_quick() {
-    let (server, client, peer) = pair(47814);
+    let (server, client, peer) = pair(26014);
     client.set_drop(50);
     server.set_drop(50);
     let mut buf = vec![0u8; 1 << 20];
@@ -542,7 +655,7 @@ mod tests {
 
   #[test]
   fn heavy_loss_lowers_the_rate() {
-    let (server, client, peer) = pair(47813);
+    let (server, client, peer) = pair(24013);
     server.set_drop(200);
     let mut buf = vec![0u8; 1 << 20];
     let mut rate = None;

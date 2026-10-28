@@ -30,6 +30,8 @@
 //!   tabs                   send the tab list   new_tab {url?}
 //!   switch_tab {id}        close_tab {id}
 //!   new_identity           restart Umbra (new Tor circuits), reopen the page
+//!   close_umbra            the phone app was cleared: close Umbra; the next
+//!                          phone hello starts it again (fresh)
 //!   restart_agent          restart this agent (Umbra keeps running)
 //! Agent -> phone: binary, first byte = kind: 1 = one JPEG frame,
 //!   2 = 20 ms of sound (48 kHz stereo s16le), 3 = one H.264 access unit
@@ -118,6 +120,8 @@ enum Exit {
   Restart,
   RestartAgent,
   Gone,
+  /// The phone app was cleared: close Umbra until a phone connects again.
+  Sleep,
 }
 
 struct Hub {
@@ -177,6 +181,10 @@ struct Hub {
   last_touch_ts: f64,
   /// What the UDP link says the network can carry (None: no opinion).
   net_rate: Option<u32>,
+  /// Videos and sounds were paused because the phone left (resumed when a
+  /// phone says hello). Paused elements carry a property of this name.
+  media_paused: bool,
+  media_key: String,
 }
 
 pub async fn run(
@@ -222,6 +230,12 @@ pub async fn run(
     touch_clock: None,
     last_touch_ts: 0.0,
     net_rate: None,
+    media_paused: false,
+    // Unguessable, so a page can't tell what it's for or fake it.
+    media_key: format!(
+      "__u{:x}",
+      std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) ^ std::process::id() as u128
+    ),
   };
   let mut start_url = home.clone();
   loop {
@@ -268,6 +282,17 @@ pub async fn run(
         log!("restarting the agent (phone asked)");
         return Ended::RestartAgent;
       }
+      Exit::Sleep => {
+        let _ = cdp.call("Browser.close", json!({}), None).await;
+        wait_for_exit(child).await;
+        hub.media_paused = false;
+        log!("closed Umbra (the phone app was cleared); it starts again when a phone connects");
+        hub.set_browser("closed: starts when the phone connects");
+        if !hub.wait_for_phone(&mut clients, &mut cmds).await {
+          return Ended::Quit;
+        }
+        start_url = home.clone();
+      }
       Exit::Restart | Exit::Quit => {
         let _ = cdp.call("Browser.close", json!({}), None).await;
         wait_for_exit(child).await;
@@ -280,6 +305,23 @@ pub async fn run(
       }
     }
   }
+}
+
+/// Pauses (and marks) playing media, or plays the marked again, in a
+/// document and its same-site frames; returns how many it paused.
+fn media_script(key: &str, pause: bool) -> String {
+  let body = if pause {
+    "if (!m.paused && !m.ended) { Object.defineProperty(m, k, { value: true, configurable: true }); m.pause(); n++; }"
+  } else {
+    "if (m[k]) { delete m[k]; m.play().catch(() => {}); n++; }"
+  };
+  format!(
+    "(() => {{ const k = {}; let n = 0;
+      const visit = d => {{ for (const m of d.querySelectorAll('video, audio')) {{ {body} }}
+        for (const f of d.querySelectorAll('iframe')) {{ try {{ if (f.contentDocument) visit(f.contentDocument); }} catch (e) {{}} }} }};
+      visit(document); return n; }})()",
+    json!(key)
+  )
 }
 
 async fn wait_for_exit(child: Option<Child>) {
@@ -877,8 +919,10 @@ impl Hub {
           }
           self.pending_ack = None;
           self.in_flight = 0;
-          // Nobody watching: stop capturing and encoding.
+          // Nobody watching: stop capturing and encoding, and pause what's
+          // playing (it resumes when the phone is back).
           self.video = None;
+          self.pause_media();
         }
       }
       ClientMsg::Text(id, text) => {
@@ -908,6 +952,10 @@ impl Hub {
       }
       "restart_agent" => {
         self.exit = Some(Exit::RestartAgent);
+        return;
+      }
+      "close_umbra" => {
+        self.exit = Some(Exit::Sleep);
         return;
       }
       "hello" => return self.on_hello(&v).await,
@@ -1086,6 +1134,86 @@ impl Hub {
     if let Some(t) = self.target.clone() {
       if let Ok(r) = self.cdp().call("Target.getTargetInfo", json!({ "targetId": t }), None).await {
         self.on_info(&r["targetInfo"]);
+      }
+    }
+    if self.media_paused {
+      self.resume_media();
+    }
+  }
+
+  /// Pauses every video and sound playing in every tab and frame (the
+  /// phone went away), marking them so only those resume.
+  fn pause_media(&mut self) {
+    let Some(cdp) = self.cdp.clone() else { return };
+    self.media_paused = true;
+    let expr = media_script(&self.media_key, true);
+    for (sess, kind) in self.sessions.values() {
+      if kind != "page" && kind != "iframe" {
+        continue;
+      }
+      let (cdp, sess, expr) = (cdp.clone(), sess.clone(), expr.clone());
+      tokio::spawn(async move {
+        let r = cdp.call("Runtime.evaluate", json!({ "expression": expr, "returnByValue": true }), Some(&sess)).await;
+        if let Some(n) = r.ok().and_then(|r| r["result"]["value"].as_u64()).filter(|n| *n > 0) {
+          log!("paused {n} playing video/sound (the phone left)");
+        }
+      });
+    }
+  }
+
+  /// Plays again what pause_media paused, as a user gesture (so autoplay
+  /// rules don't stop it).
+  fn resume_media(&mut self) {
+    let Some(cdp) = self.cdp.clone() else { return };
+    self.media_paused = false;
+    let expr = media_script(&self.media_key, false);
+    for (sess, kind) in self.sessions.values() {
+      if kind != "page" && kind != "iframe" {
+        continue;
+      }
+      let (cdp, sess, expr) = (cdp.clone(), sess.clone(), expr.clone());
+      tokio::spawn(async move {
+        let args = json!({ "expression": expr, "returnByValue": true, "userGesture": true });
+        let r = cdp.call("Runtime.evaluate", args, Some(&sess)).await;
+        if let Some(n) = r.ok().and_then(|r| r["result"]["value"].as_u64()).filter(|n| *n > 0) {
+          log!("resumed {n} video/sound (the phone is back)");
+        }
+      });
+    }
+  }
+
+  /// While Umbra is closed: waits for a phone's hello (or the tray asking
+  /// for the window). False if the agent should quit.
+  async fn wait_for_phone(
+    &mut self,
+    clients: &mut mpsc::UnboundedReceiver<ClientMsg>,
+    cmds: &mut mpsc::UnboundedReceiver<Cmd>,
+  ) -> bool {
+    loop {
+      tokio::select! {
+        m = clients.recv() => match m {
+          None => return false,
+          Some(m) => {
+            let hello = matches!(&m, ClientMsg::Text(_, t) if serde_json::from_str::<Value>(t).is_ok_and(|v| v["t"] == "hello"));
+            // A hello only sets the view while Umbra is closed; the stream
+            // starts once it's running again.
+            self.on_client(m).await;
+            if hello && self.client.is_some() {
+              log!("a phone connected: starting Umbra");
+              return true;
+            }
+          }
+        },
+        c = cmds.recv() => match c {
+          None | Some(Cmd::Quit) => return false,
+          Some(Cmd::Restart) => return true,
+          Some(Cmd::ShowWindow(b)) => {
+            self.shown = b;
+            if b {
+              return true;
+            }
+          }
+        },
       }
     }
   }

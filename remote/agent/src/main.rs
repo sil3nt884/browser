@@ -96,6 +96,12 @@ fn main() {
   if raw.get(1).map(String::as_str) == Some("--video-test") && raw.len() == 5 {
     return video_test(&raw[2], raw[3].parse().unwrap_or(5), &raw[4]);
   }
+  if raw.get(1).map(String::as_str) == Some("--udp-send") && raw.len() >= 4 {
+    return net::send_test(&raw[2], &raw[3..]);
+  }
+  if raw.get(1).map(String::as_str) == Some("--media-test") && raw.len() == 3 {
+    return net::media_test(&raw[2]);
+  }
   if raw.get(1).map(String::as_str) == Some("--udp-test") && raw.len() >= 4 {
     let drop = raw.get(4).and_then(|d| d.parse().ok()).unwrap_or(0);
     let hz = raw.get(5).and_then(|d| d.parse().ok()).unwrap_or(60);
