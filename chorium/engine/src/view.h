@@ -1,0 +1,183 @@
+// Copyright 2026 The Umbra Authors. Use of this source code is governed by a
+// BSD-style license that can be found in the LICENSE file.
+
+#ifndef UMBRA_CHORIUM_ENGINE_SRC_VIEW_H_
+#define UMBRA_CHORIUM_ENGINE_SRC_VIEW_H_
+
+#include <map>
+#include <memory>
+#include <string>
+
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ptr_exclusion.h"
+#include "base/memory/weak_ptr.h"
+#include "base/values.h"
+#include "content/public/browser/javascript_dialog_manager.h"
+#include "content/public/browser/web_contents_delegate.h"
+#include "content/public/browser/web_contents_observer.h"
+#include "services/viz/privileged/mojom/compositing/frame_sink_video_capture.mojom.h"
+#include "ui/gfx/geometry/size.h"
+#include "umbra/chorium/interfaces/native/chorium.h"
+#include "url/gurl.h"
+
+namespace viz {
+class ClientFrameSinkVideoCapturer;
+}
+
+namespace content {
+class RenderWidgetHost;
+class WebContents;
+}  // namespace content
+
+namespace chorium {
+class View;
+class WindowHost;
+}  // namespace chorium
+
+// The handle the C API hands out. Created on the caller's thread; |view| is
+// only touched on the engine thread.
+struct chorium_view {
+  chorium_frame_fn on_frame = nullptr;
+  chorium_event_fn on_event = nullptr;
+  // The app's own pointer, only handed back to its callbacks.
+  RAW_PTR_EXCLUSION void* user = nullptr;
+  raw_ptr<chorium::View> view = nullptr;
+};
+
+namespace chorium {
+
+// One page: a WebContents in a windowless WindowHost, with its frames
+// captured and handed to the C callbacks. Engine thread only.
+class View : public content::WebContentsDelegate,
+             public content::WebContentsObserver,
+             public content::JavaScriptDialogManager,
+             public viz::mojom::FrameSinkVideoConsumer {
+ public:
+  // Creates the view for |handle| and sets handle->view.
+  static void Create(chorium_view* handle, int width, int height);
+  // Destroys the view and frees |handle|.
+  static void Close(chorium_view* handle);
+  // Destroys every view (engine shutdown).
+  static void CloseAll();
+
+  View(const View&) = delete;
+  View& operator=(const View&) = delete;
+  ~View() override;
+
+  void LoadUrl(const std::string& url);
+  void LoadHtml(const std::string& html, const std::string& base_url);
+  void Back();
+  void Forward();
+  void Reload();
+  void Stop();
+  void Resize(int width, int height);
+  void RefreshFrame();
+
+  void Mouse(int type, int x, int y, int button, int click_count, int mods);
+  void Wheel(int x, int y, float dx, float dy, int mods);
+  void Key(bool down, int key_code, int mods);
+  void Text(const std::u16string& text);
+  void SetFocus(bool focused);
+  void Eval(int id, const std::u16string& js);
+  void DialogReply(int id, bool accept, const std::u16string& text);
+
+ private:
+  View(chorium_view* handle, int width, int height);
+
+  void Emit(base::DictValue event);
+  content::RenderWidgetHost* Widget();
+  void StartCapture();
+  int ButtonModifiers() const;
+
+  // content::WebContentsDelegate:
+  content::WebContents* AddNewContents(
+      content::WebContents* source,
+      std::unique_ptr<content::WebContents> new_contents,
+      const GURL& target_url,
+      WindowOpenDisposition disposition,
+      const blink::mojom::WindowFeatures& window_features,
+      bool user_gesture,
+      bool* was_blocked) override;
+  content::WebContents* OpenURLFromTab(
+      content::WebContents* source,
+      const content::OpenURLParams& params,
+      base::OnceCallback<void(content::NavigationHandle&)>
+          navigation_handle_callback) override;
+  void CloseContents(content::WebContents* source) override;
+  content::JavaScriptDialogManager* GetJavaScriptDialogManager(
+      content::WebContents* source) override;
+  bool CanEnterFullscreenModeForTab(
+      content::RenderFrameHost* requesting_frame) override;
+  void EnterFullscreenModeForTab(
+      content::RenderFrameHost* requesting_frame,
+      const blink::mojom::FullscreenOptions& options) override;
+  void ExitFullscreenModeForTab(content::WebContents* source) override;
+  bool IsFullscreenForTabOrPending(
+      const content::WebContents* web_contents) override;
+
+  // content::WebContentsObserver:
+  void RenderFrameHostChanged(content::RenderFrameHost* old_host,
+                              content::RenderFrameHost* new_host) override;
+  void DidFinishNavigation(content::NavigationHandle* navigation) override;
+  void TitleWasSet(content::NavigationEntry* entry) override;
+  void DidStartLoading() override;
+  void DidStopLoading() override;
+  void DidFinishLoad(content::RenderFrameHost* render_frame_host,
+                     const GURL& validated_url) override;
+  void DidFailLoad(content::RenderFrameHost* render_frame_host,
+                   const GURL& validated_url,
+                   int error_code) override;
+  void PrimaryMainFrameRenderProcessGone(
+      base::TerminationStatus status) override;
+
+  // content::JavaScriptDialogManager:
+  void RunJavaScriptDialog(content::WebContents* web_contents,
+                           content::RenderFrameHost* render_frame_host,
+                           content::JavaScriptDialogType dialog_type,
+                           const std::u16string& message_text,
+                           const std::u16string& default_prompt_text,
+                           DialogClosedCallback callback,
+                           bool* did_suppress_message) override;
+  void RunBeforeUnloadDialog(content::WebContents* web_contents,
+                             content::RenderFrameHost* render_frame_host,
+                             bool is_reload,
+                             DialogClosedCallback callback) override;
+  void CancelDialogs(content::WebContents* web_contents,
+                     bool reset_state) override;
+
+  // viz::mojom::FrameSinkVideoConsumer:
+  void OnFrameCaptured(
+      media::mojom::VideoBufferHandlePtr data,
+      media::mojom::VideoFrameInfoPtr info,
+      const gfx::Rect& content_rect,
+      mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
+          callbacks) override;
+  void OnNewCaptureVersion(
+      const media::CaptureVersion& capture_version) override {}
+  void OnFrameWithEmptyRegionCapture() override {}
+  void OnStopped() override {}
+  void OnLog(const std::string& message) override {}
+
+  const raw_ptr<chorium_view> handle_;
+  gfx::Size size_;  // CSS pixels
+  bool fullscreen_ = false;
+  int buttons_down_ = 0;  // blink::WebInputEvent button modifier bits
+  int next_dialog_id_ = 1;
+  std::map<int, DialogClosedCallback> dialogs_;
+  // The last committed main-frame navigation: an error page commits as
+  // chrome-error:// and then "finishes loading" like any other page.
+  GURL committed_url_;
+  int committed_error_ = 0;  // net::Error, 0 = OK
+
+  std::unique_ptr<WindowHost> host_;
+  std::unique_ptr<content::WebContents> web_contents_;
+  std::unique_ptr<viz::ClientFrameSinkVideoCapturer> capturer_;
+  base::ScopedClosureRunner keep_rendering_;
+
+  base::WeakPtrFactory<View> weak_factory_{this};
+};
+
+}  // namespace chorium
+
+#endif  // UMBRA_CHORIUM_ENGINE_SRC_VIEW_H_

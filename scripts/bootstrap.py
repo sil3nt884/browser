@@ -101,8 +101,9 @@ def main():
   args = ap.parse_args()
 
   if args.target == "win" and not IS_WIN:
-    sys.exit("Windows builds must be bootstrapped on Windows (Chromium does "
-             "not support cross-compiling Windows from Linux for non-Googlers).")
+    sys.exit("This script bootstraps Windows builds on Windows only. To "
+             "cross-compile Windows from Linux with a packaged Windows SDK, "
+             "see chorium/docker (Chromium docs/win_cross.md).")
   if args.target == "android" and platform.system() != "Linux":
     sys.exit("Android builds must be bootstrapped on Linux x64.")
 

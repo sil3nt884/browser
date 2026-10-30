@@ -1,0 +1,335 @@
+// Copyright 2026 The Umbra Authors.
+//
+// The Chorium runtime contract (lower layer). Every native runtime (Windows,
+// Linux, Android) implements these imports with its own platform APIs and its
+// own Chorium engine build, and runs one component built for the `runnable`
+// world below.
+//
+// Normally only chorium.wasm (the portable layer, ../browser/browser.wit)
+// uses `pages` and `net`. An app is composed with chorium.wasm and talks to
+// it; the composed component is what the runtime runs.
+//
+// What the runtime keeps to itself, below this contract:
+//   - Tor and the kill switch. There is no call here that reaches the network
+//     except through the engine, and none that turns Tor off.
+//   - Chromium's frames. Pages are drawn by the runtime into the surface
+//     (draw-page); pixels are never copied into Wasm memory.
+//   - The disk. Components only see directories the runtime hands them.
+
+package umbra:chorium@0.3.0;
+
+interface types {
+  record size {
+    width: u32,
+    height: u32,
+  }
+
+  record rect {
+    x: s32,
+    y: s32,
+    width: u32,
+    height: u32,
+  }
+
+  // 0xAARRGGBB, not premultiplied.
+  type color = u32;
+
+  flags modifiers {
+    shift,
+    ctrl,
+    alt,
+    meta,
+  }
+
+  enum mouse-button {
+    none,
+    left,
+    middle,
+    right,
+  }
+
+  record pointer {
+    x: s32,
+    y: s32,
+    button: mouse-button,
+    click-count: u32,
+    modifiers: modifiers,
+  }
+
+  record wheel {
+    x: s32,
+    y: s32,
+    // CSS pixels; positive dy scrolls the page down.
+    dx: f32,
+    dy: f32,
+    modifiers: modifiers,
+  }
+
+  record key {
+    down: bool,
+    // Windows virtual-key code (VK_RETURN, 'A', ...) on every platform.
+    code: u32,
+    modifiers: modifiers,
+  }
+
+  record touch-point {
+    id: u32,
+    x: f32,
+    y: f32,
+  }
+
+  // Input, in the coordinates of whatever receives it: surface coordinates
+  // when the runtime gives it to the app, page coordinates when passed on to
+  // a page.
+  variant input {
+    pointer-move(pointer),
+    pointer-down(pointer),
+    pointer-up(pointer),
+    pointer-leave,
+    wheel(wheel),
+    key(key),
+    text(string),
+    touch-start(list<touch-point>),
+    touch-move(list<touch-point>),
+    touch-end(list<touch-point>),
+    // The window gained or lost focus.
+    focus(bool),
+    // Android back button / gesture.
+    back,
+  }
+
+  enum dialog-kind {
+    alert,
+    confirm,
+    prompt,
+    beforeunload,
+  }
+
+  record dialog {
+    id: u32,
+    kind: dialog-kind,
+    message: string,
+    default-text: string,
+  }
+
+  // A navigation committed.
+  record nav-state {
+    url: string,
+    can-go-back: bool,
+    can-go-forward: bool,
+  }
+
+  record load-result {
+    url: string,
+    ok: bool,
+    // Chromium's short error name, e.g. "ERR_PROXY_CONNECTION_FAILED".
+    error: string,
+  }
+
+  record eval-result {
+    id: u32,
+    ok: bool,
+    // The value as JSON text.
+    json: string,
+  }
+
+  variant page-event {
+    navigated(nav-state),
+    title(string),
+    loading(bool),
+    loaded(load-result),
+    // The page asked for a new tab/window; open a page for it if wanted.
+    new-window(string),
+    fullscreen(bool),
+    dialog(dialog),
+    eval-result(eval-result),
+    // The page's process died; reload to recover.
+    crashed,
+    // The page called window.close().
+    closed,
+    // A new frame is ready; redraw if this page is visible.
+    frame,
+  }
+}
+
+// Chromium page views, with Tor underneath.
+interface pages {
+  use types.{size, rect, input};
+
+  resource page {
+    // A page |size| CSS pixels big, starting on about:blank.
+    constructor(size: size);
+    // Identifies this page in on-page-event.
+    id: func() -> u32;
+
+    load-url: func(url: string);
+    load-html: func(html: string, base-url: option<string>);
+    back: func();
+    forward: func();
+    reload: func();
+    stop: func();
+    resize: func(size: size);
+
+    // Input in page coordinates (CSS pixels from the page's top-left).
+    send-input: func(event: input);
+
+    // Runs JavaScript in a private world (sees the DOM, not the page's own
+    // variables); the answer arrives as an eval-result event.
+    eval: func(id: u32, js: string);
+    dialog-reply: func(id: u32, accept: bool, text: option<string>);
+
+    // Draws the page's latest frame into the surface, scaled into |dest|
+    // (surface coordinates). Here rather than in `surface` so that importing
+    // `surface` doesn't bring in `pages`.
+    draw: func(dest: rect);
+  }
+}
+
+// The window (desktop) or screen (Android) to draw into. Drawing is
+// immediate: draw everything for a frame, then present.
+interface surface {
+  use types.{size, rect, color};
+
+  // Current size in CSS pixels, and the device pixel ratio.
+  dimensions: func() -> size;
+  scale: func() -> f32;
+
+  clear: func(color: color);
+  fill-rect: func(r: rect, color: color);
+  stroke-rect: func(r: rect, color: color, width: f32);
+  fill-round-rect: func(r: rect, radius: f32, color: color);
+  // |y| is the text baseline.
+  draw-text: func(x: s32, y: s32, text: string, font-size: f32, color: color);
+  measure-text: func(text: string, font-size: f32) -> size;
+
+  push-clip: func(r: rect);
+  pop-clip: func();
+  present: func();
+
+  // Show/hide the on-screen keyboard (Android).
+  show-keyboard: func(visible: bool);
+  // Window title (desktop); ignored where there is none.
+  set-title: func(title: string);
+
+  // System icons: Segoe Fluent Icons on Windows, Material Symbols on
+  // Android. `close` is the small one for tabs; `close-window`, `minimize`,
+  // `maximize` and `restore` are window buttons.
+  enum icon {
+    back,
+    forward,
+    reload,
+    stop,
+    close,
+    add,
+    menu,
+    search,
+    lock,
+    info,
+    page,
+    settings,
+    history,
+    home,
+    check,
+    minimize,
+    maximize,
+    restore,
+    close-window,
+  }
+  // Draws |icon| centred in |r|, sized to fit it.
+  draw-icon: func(icon: icon, r: rect, color: color);
+
+  // True while the system is in dark mode. Changes arrive as on-draw.
+  dark-mode: func() -> bool;
+
+  // A desktop window without a system title bar: the app draws the whole
+  // window, title bar included, in the top |height| CSS pixels. The window
+  // buttons (minimise, maximise, close) take |buttons-width| at the right
+  // end of that band, three equal buttons; the app draws them (so they match
+  // its look) and the runtime makes them work, reporting the pointer over
+  // them as pointer-move/leave.
+  record title-bar {
+    height: u32,
+    buttons-width: u32,
+    maximized: bool,
+  }
+  // None where the system draws the frame, or there is none (Android).
+  title-bar-layout: func() -> option<title-bar>;
+  // Parts of the title-bar band that drag the window (empty space). Replaces
+  // the previous areas; set them again after the layout changes.
+  set-drag-areas: func(areas: list<rect>);
+}
+
+// The only network access. Always through Tor.
+interface net {
+  record header {
+    name: string,
+    value: string,
+  }
+
+  record request {
+    method: string,
+    url: string,
+    headers: list<header>,
+    body: list<u8>,
+  }
+
+  record response {
+    status: u16,
+    headers: list<header>,
+    body: list<u8>,
+  }
+
+  fetch: func(req: request) -> result<response, string>;
+  // Tor bootstrap progress 0-100, or -1 if Tor failed.
+  tor-progress: func() -> s32;
+}
+
+// Files, only inside directories the runtime grants.
+interface files {
+  resource dir {
+    read: func(name: string) -> result<list<u8>, string>;
+    write: func(name: string, data: list<u8>) -> result<_, string>;
+    remove: func(name: string) -> result<_, string>;
+    names: func() -> list<string>;
+  }
+
+  // Private storage, kept between runs.
+  app-data: func() -> dir;
+}
+
+interface log {
+  enum level {
+    debug,
+    info,
+    warn,
+    error,
+  }
+  write: func(level: level, message: string);
+}
+
+// What the runtime runs and calls into. All calls come from the runtime's
+// UI thread, one at a time.
+world runnable {
+  import pages;
+  import surface;
+  import net;
+  import files;
+  import log;
+
+  use types.{input, page-event};
+
+  // Called once, after the window/surface exists and before any other call.
+  export start: func(args: list<string>);
+  // User input on the surface (surface coordinates).
+  export on-input: func(event: input);
+  // Something happened in one of the pages.
+  export on-page-event: func(page-id: u32, event: page-event);
+  // Redraw now (surface resized or exposed, Tor progress changed, ...). A
+  // new page frame arrives as page-event.frame instead.
+  export on-draw: func();
+  // Android: went to the background / came back. Desktop: minimised.
+  export on-pause: func();
+  export on-resume: func();
+  // Called before the runtime exits; nothing is called after it.
+  export on-stop: func();
+}

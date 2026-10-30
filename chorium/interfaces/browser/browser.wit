@@ -1,0 +1,130 @@
+// Copyright 2026 The Umbra Authors.
+//
+// The Chorium browser contract (upper layer): what chorium.wasm, the portable
+// browser layer, offers to apps. Versioned apart from the runtime contract
+// (../chorium/chorium.wit) it is built on.
+//
+//   runtime --events--> app.wasm --calls--> chorium.wasm --calls--> runtime
+//
+// Calls only go down: the component model doesn't allow chorium.wasm to call
+// back into the app. So the app receives the runtime's events (it exports
+// the `runnable` functions), hands page events to handle-page-event, and
+// gets back what they mean as browser-events.
+//
+// chorium.wasm owns the pages; the app sees tabs by id. It draws its own UI
+// with `surface` and never touches `pages` or `net` itself.
+
+package umbra:browser@0.2.0;
+
+interface browser {
+  use umbra:chorium/types@0.3.0.{size, rect, input, page-event, dialog};
+
+  // Tabs are numbered from 1; an id is never reused.
+  type tab-id = u32;
+
+  record tab-info {
+    id: tab-id,
+    // The committed URL; empty before the first navigation commits.
+    url: string,
+    title: string,
+    loading: bool,
+    can-go-back: bool,
+    can-go-forward: bool,
+    // Chromium's error name if the last load failed.
+    error: option<string>,
+  }
+
+  record history-entry {
+    url: string,
+    title: string,
+    visits: u32,
+    // Seconds since 1970.
+    last-visit: u64,
+  }
+
+  variant browser-event {
+    // A tab's URL, title, loading state, history buttons or error changed.
+    changed(tab-info),
+    // A page asked for a new tab; it is open and loading.
+    opened(tab-info),
+    // A page closed its own tab (window.close()).
+    closed(tab-id),
+    // The tab has a new frame; redraw it if it is visible.
+    frame(tab-id),
+    // A page dialog waits for dialog-reply.
+    dialog(tuple<tab-id, dialog>),
+    // The tab's page process crashed; it is being reloaded.
+    crashed(tab-id),
+  }
+
+  // A new tab |size| CSS pixels big, going to |text| (see navigate); empty
+  // text leaves it on about:blank.
+  open-tab: func(text: string, size: size) -> tab-id;
+  close-tab: func(tab: tab-id);
+  // Open tabs, oldest first.
+  tabs: func() -> list<tab-info>;
+  info: func(tab: tab-id) -> option<tab-info>;
+
+  // |text| is what a person typed: a URL, a host name, or words to search
+  // for (with the "search" setting).
+  navigate: func(tab: tab-id, text: string);
+  // The URL navigate would go to for |text|.
+  resolve: func(text: string) -> string;
+  back: func(tab: tab-id);
+  forward: func(tab: tab-id);
+  reload: func(tab: tab-id);
+  stop: func(tab: tab-id);
+  resize: func(tab: tab-id, size: size);
+
+  // Input in page coordinates.
+  send-input: func(tab: tab-id, event: input);
+  // Draws the tab's latest frame into the surface at |dest|.
+  draw: func(tab: tab-id, dest: rect);
+  dialog-reply: func(tab: tab-id, id: u32, accept: bool, text: option<string>);
+
+  // Every page event the runtime delivers goes here; returns what it means
+  // for the tabs (often nothing).
+  handle-page-event: func(page-id: u32, event: page-event) -> list<browser-event>;
+
+  // Visited pages, most recent first; kept in the app's data directory.
+  history: func(limit: u32) -> list<history-entry>;
+  clear-history: func();
+
+  // Settings, kept in the app's data directory. Known keys:
+  //   search    URL template for typed words, %s = the words
+  //             (default https://html.duckduckgo.com/html/?q=%s)
+  //   home      URL for new tabs opened with empty text
+  //             (default https://html.duckduckgo.com/html/)
+  get-setting: func(key: string) -> option<string>;
+  set-setting: func(key: string, value: string);
+
+  // Tor bootstrap progress 0-100, or -1 if Tor failed.
+  tor-progress: func() -> s32;
+}
+
+// chorium.wasm.
+world portable {
+  import umbra:chorium/pages@0.3.0;
+  import umbra:chorium/net@0.3.0;
+  import umbra:chorium/files@0.3.0;
+  import umbra:chorium/log@0.3.0;
+  export browser;
+}
+
+// An app. Composed with chorium.wasm (wac plug), it becomes a component for
+// the runtime's `runnable` world: same exports, same meaning.
+world app {
+  import browser;
+  import umbra:chorium/surface@0.3.0;
+  import umbra:chorium/log@0.3.0;
+
+  use umbra:chorium/types@0.3.0.{input, page-event};
+
+  export start: func(args: list<string>);
+  export on-input: func(event: input);
+  export on-page-event: func(page-id: u32, event: page-event);
+  export on-draw: func();
+  export on-pause: func();
+  export on-resume: func();
+  export on-stop: func();
+}

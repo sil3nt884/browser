@@ -91,6 +91,20 @@ WSL2 Ubuntu on this PC. Keep that checkout inside the WSL filesystem, not
 `/mnt/c`, raise WSL's memory limit in `.wslconfig`, and check free space
 first (~120 GB).
 
+## Chorium (`chorium/`, 2026-10-30)
+
+Chromium's engine as an embeddable library with Tor inside, plus a
+WebAssembly app layer; read `chorium/README.md`. Layers: `engine/`
+(chorium.dll, //content embedder, C ABI in `interfaces/native/chorium.h`),
+`runtime/win/` (Chorium.exe: Wasmtime + Direct2D window), `portable/`
+(chorium.wasm: tabs, history, settings), `apps/browser/` (Chrome-style
+sample). Contracts: `interfaces/chorium/chorium.wit` (lower) and
+`interfaces/browser/browser.wit` (upper). Everything builds in Docker
+(`chorium/docker`, image `chorium-build:157`, volume `chorium-work`); the
+Windows engine is cross-compiled. Verified on Windows 11: pages through
+Tor, fail closed without umbra_tor.dll, composed app with tabs, settings,
+history. Not done: sandbox, Android/Linux runtimes.
+
 ## Windows build recipe
 
 1. **Disk space first.** Chromium needs ~120 GB free on an NTFS drive. The

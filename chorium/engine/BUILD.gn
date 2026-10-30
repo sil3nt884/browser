@@ -1,0 +1,142 @@
+# Copyright 2026 The Umbra Authors.
+#
+# Chorium: Chromium's page engine as a library (chorium.dll / libchorium.so),
+# with Tor inside. Built on //content directly; none of //chrome is used.
+#
+#   autoninja -C out/chorium-win umbra/chorium/engine:chorium_test
+#
+# Output next to each other in the out dir (ship these together):
+#   chorium.dll, chorium.pak, umbra_tor.dll, icudtl.dat,
+#   snapshot_blob.bin (v8_context_snapshot.bin on native Windows builds)
+
+import("//tools/grit/repack.gni")
+
+config("chorium_public") {
+  include_dirs = [ "//umbra/chorium/interfaces/native" ]
+}
+
+shared_library("chorium") {
+  sources = [
+    "//umbra/chorium/interfaces/native/chorium.h",
+    "src/api.cc",
+    "src/browser_context.cc",
+    "src/browser_context.h",
+    "src/engine.cc",
+    "src/engine.h",
+    "src/view.cc",
+    "src/view.h",
+    "src/window_host.cc",
+    "src/window_host.h",
+  ]
+  defines = [ "CHORIUM_IMPLEMENTATION" ]
+  public_configs = [ ":chorium_public" ]
+
+  deps = [
+    ":pak",
+    "//base",
+    "//components/embedder_support:user_agent",
+    "//components/input",
+    "//components/viz/host",
+    "//content/public/app",
+    "//content/public/browser",
+    "//content/public/common",
+    "//content/public/gpu",
+    "//content/public/renderer",
+    "//content/public/utility",
+    "//media",
+    "//media/capture/mojom:video_capture_buffer",
+    "//mojo/public/cpp/bindings",
+    "//net",
+    "//sandbox/policy",
+    "//services/network:network_service",
+    "//services/network/public/mojom",
+    "//services/viz/privileged/mojom",
+    "//third_party/blink/public/common",
+    "//ui/aura",
+    "//ui/base",
+    "//ui/display",
+    "//ui/events",
+    "//ui/events/devices",
+    "//ui/gfx",
+    "//url",
+    "//umbra/app",
+    "//umbra/common",
+  ]
+  data_deps = [
+    ":pak",
+    "//tools/v8_context_snapshot",
+  ]
+
+  if (is_win) {
+    deps += [
+      "//content:sandbox_helper_win",
+      "//sandbox",
+    ]
+    libs = [ "shell32.lib" ]
+  }
+}
+
+# A tiny C program that renders a page through Chorium and saves it as a
+# .bmp: the end-to-end check for the library.
+executable("chorium_test") {
+  sources = [ "//umbra/chorium/tests/engine/chorium_test.c" ]
+  deps = [ ":chorium" ]
+  if (is_win) {
+    deps += [ "//build/win:default_exe_manifest" ]
+    # Same stack size as chrome.exe; page processes run in this .exe too.
+    ldflags = [ "/STACK:0x800000" ]
+  }
+}
+
+# Everything Chromium's engine loads from resource packs, without the
+# browser's own UI resources. Same list as content_shell's pak, minus its
+# test and shell pages.
+repack("pak") {
+  sources = [
+    "$root_gen_dir/base/tracing/protos/tracing_proto_resources.pak",
+    "$root_gen_dir/components/ukm_resources.pak",
+    "$root_gen_dir/content/browser/resources/media/media_internals_resources.pak",
+    "$root_gen_dir/content/browser/webrtc/resources/webrtc_internals_resources.pak",
+    "$root_gen_dir/content/content_resources.pak",
+    "$root_gen_dir/content/gpu_resources.pak",
+    "$root_gen_dir/content/histograms_resources.pak",
+    "$root_gen_dir/content/process_resources.pak",
+    "$root_gen_dir/content/quota_internals_resources.pak",
+    "$root_gen_dir/content/service_worker_resources.pak",
+    "$root_gen_dir/mojo/public/js/mojo_bindings_resources.pak",
+    "$root_gen_dir/net/net_resources.pak",
+    "$root_gen_dir/third_party/blink/public/resources/blink_resources.pak",
+    "$root_gen_dir/third_party/blink/public/resources/blink_scaled_resources_100_percent.pak",
+    "$root_gen_dir/third_party/blink/public/resources/inspector_overlay_resources.pak",
+    "$root_gen_dir/third_party/blink/public/strings/blink_strings_en-US.pak",
+    "$root_gen_dir/third_party/blink/public/strings/permission_element_generated_strings.pak",
+    "$root_gen_dir/third_party/blink/public/strings/permission_element_strings_en-US.pak",
+    "$root_gen_dir/ui/resources/ui_lottie_resources.pak",
+    "$root_gen_dir/ui/resources/ui_resources_100_percent.pak",
+    "$root_gen_dir/ui/strings/app_locale_settings_en-US.pak",
+    "$root_gen_dir/ui/strings/auto_image_annotation_strings_en-US.pak",
+    "$root_gen_dir/ui/strings/ax_strings_en-US.pak",
+    "$root_gen_dir/ui/strings/ui_strings_en-US.pak",
+    "$root_gen_dir/ui/webui/resources/webui_resources.pak",
+  ]
+  deps = [
+    "//base/tracing/protos:chrome_track_event_resources",
+    "//components/ukm/debug:resources",
+    "//content:content_resources",
+    "//content/browser/resources",
+    "//content/browser/resources/media:resources",
+    "//content/browser/webrtc/resources",
+    "//mojo/public/js:resources",
+    "//net:net_resources",
+    "//third_party/blink/public:devtools_inspector_resources",
+    "//third_party/blink/public:resources",
+    "//third_party/blink/public:scaled_resources_100_percent",
+    "//third_party/blink/public/strings",
+    "//third_party/blink/public/strings:permission_element_generated_strings",
+    "//third_party/blink/public/strings:permission_element_strings",
+    "//ui/resources",
+    "//ui/strings",
+    "//ui/webui/resources",
+  ]
+  output = "$root_out_dir/chorium.pak"
+}
