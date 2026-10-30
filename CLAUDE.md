@@ -103,7 +103,29 @@ sample). Contracts: `interfaces/chorium/chorium.wit` (lower) and
 (`chorium/docker`, image `chorium-build:157`, volume `chorium-work`); the
 Windows engine is cross-compiled. Verified on Windows 11: pages through
 Tor, fail closed without umbra_tor.dll, composed app with tabs, settings,
-history. Not done: sandbox, Android/Linux runtimes.
+history. Not done: sandbox (user's decision), Linux runtime, file and colour
+pickers.
+
+Android runtime (`runtime/android/`, Chorium.apk, arm64) verified on a
+Redmi Note 14 (Android 16), 2026-10-30: phone layout, Chrome-style gestures
+(toolbar swipes, swipe tabs away, pull to refresh, edge swipe back,
+long-press menu), full-screen video, session restore, pages following the
+app's theme, mobile user agent. Most Android bugs were setup content shell
+does and we hadn't (resource data pack, Compositor::Initialize, text
+selection controller, network change factory, GPU Java libs, APK version,
+mobile UA switch); compare with `content/shell` first when something breaks.
+Test over USB: Google platform-tools in `C:\me-tor\chorium-tools\
+platform-tools`, `ADB_SERVER_PORT=5038` (5037 is held), each install needs
+the user to accept HyperOS's "Install via USB" prompt; HyperOS blocks adb
+taps. DevTools: `adb forward tcp:9333 localabstract:chorium_devtools_remote`
+and `C:\me-tor\chorium-out\android-arm64\cdp.py`.
+
+Tor switch (both platforms): off stops Tor (`umbra_tor_stop`, an optional
+export; the Tor ABI stays 1) and pages go direct; on restarts it, fail
+closed until up. Chorium drops Umbra's `--host-resolver-rules` DNS block
+(direct mode needs DNS; the user accepted this). Windows wheel notches are
+sent as plain pixels in one gesture so Chromium animates them (smooth
+scrolling); touchpad deltas stay precise.
 
 ## Windows build recipe
 

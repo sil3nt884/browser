@@ -134,9 +134,9 @@ IDWriteTextFormat* format(float size, bool icon) {
 
 void drop_page_bitmaps() {
   for (int i = 0; i <= MAX_PAGES; ++i) {
-    ID2D1Bitmap* b = (ID2D1Bitmap*)g_pages[i].bitmap;
+    ID2D1Bitmap* b = (ID2D1Bitmap*)g_win_pages[i].bitmap;
     release(b);
-    g_pages[i].bitmap = nullptr;
+    g_win_pages[i].bitmap = nullptr;
   }
 }
 
@@ -326,7 +326,8 @@ void surface_draw_icon(int icon, int x, int y, int w, int h, uint32_t argb) {
   g_target->SetTransform(D2D1::Matrix3x2F::Identity());
 }
 
-void surface_draw_page(host_page* page, int x, int y, int w, int h) {
+void surface_draw_page(uint32_t page_id, int x, int y, int w, int h) {
+  win_page* page = &g_win_pages[page_id];
   if (!begin()) {
     return;
   }
@@ -362,7 +363,8 @@ void surface_draw_page(host_page* page, int x, int y, int w, int h) {
   }
 }
 
-void surface_forget_page(host_page* page) {
+void surface_forget_page(uint32_t page_id) {
+  win_page* page = &g_win_pages[page_id];
   ID2D1Bitmap* bitmap = (ID2D1Bitmap*)page->bitmap;
   release(bitmap);
   page->bitmap = nullptr;
@@ -395,6 +397,38 @@ void surface_present(void) {
     drop_target();  // the GPU went away; the next frame makes a new one
     PostMessageW(g_window, WM_APP_DRAW, 0, 0);
   }
+}
+
+float surface_scale(void) { return g_scale; }
+
+void surface_show_keyboard(bool visible) {}  // no on-screen keyboard
+
+void surface_set_title(const char* utf8, size_t len) {
+  UINT32 n;
+  wchar_t* w = wide(utf8, len, &n);
+  SetWindowTextW(g_window, w);
+  free(w);
+}
+
+void surface_copy_text(const char* utf8, size_t len) {
+  UINT32 n;
+  wchar_t* w = wide(utf8, len, &n);
+  HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, (n + 1) * sizeof(wchar_t));
+  if (mem) {
+    memcpy(GlobalLock(mem), w, (n + 1) * sizeof(wchar_t));
+    GlobalUnlock(mem);
+    if (OpenClipboard(g_window)) {
+      EmptyClipboard();
+      if (SetClipboardData(CF_UNICODETEXT, mem)) {
+        mem = nullptr;  // the clipboard owns it now
+      }
+      CloseClipboard();
+    }
+    if (mem) {
+      GlobalFree(mem);
+    }
+  }
+  free(w);
 }
 
 bool surface_dark_mode(void) {

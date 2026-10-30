@@ -65,6 +65,12 @@ void theme_update(void) {
   bool dark = strcmp(mode, "dark") == 0 ||
               (strcmp(mode, "light") != 0 && umbra_chorium_surface_dark_mode());
   T = dark ? &kDark : &kLight;
+  /* Pages follow the same theme (prefers-color-scheme). */
+  static int sent = -1;
+  if ((int)dark != sent) {
+    sent = dark;
+    umbra_browser_browser_set_dark_mode(dark);
+  }
 }
 
 /* --- geometry and drawing ------------------------------------------------- */
@@ -115,6 +121,13 @@ void text_in(rect_t r, const char* s, float size, uint32_t c) {
 
 void icon(icon_t which, rect_t r, uint32_t c) {
   umbra_chorium_surface_draw_icon(which, &r, c);
+}
+
+void toggle_switch(rect_t r, bool on) {
+  rect_t track = rect(r.x + (int)r.width - 36, r.y + ((int)r.height - 20) / 2,
+                      36, 20);
+  fill_round(track, 10, on ? T->accent : T->icon_off);
+  circle(on ? track.x + 26 : track.x + 10, track.y + 10, 7, 0xFFFFFFFF);
 }
 
 void icon_centered(icon_t which, rect_t box, int size, uint32_t c) {
@@ -252,6 +265,9 @@ void field_draw(const field_t* f, rect_t r, int x, float size, bool focused,
     if (focused && f->selected) {
       int w = text_width(f->buf, size);
       int h = (int)(size * 1.4f);
+      if (w + 2 > (int)box.width) {
+        w = (int)box.width - 2; /* long text is clipped; so is its highlight */
+      }
       fill(rect(x - 1, r.y + ((int)r.height - h) / 2, w + 2, h),
            T->selection);
     }

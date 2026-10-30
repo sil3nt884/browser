@@ -1,8 +1,8 @@
 # Chorium
 
-Chromium's page engine as an embeddable library, with Tor inside. No browser
-UI, no settings, no command-line flags, no DevTools. Three parts, joined by
-two versioned contracts:
+Chromium's page engine as an embeddable library, with Tor inside (and a Tor
+switch). No browser UI, no command-line flags. Runs on Windows and Android.
+Three parts, joined by two versioned contracts:
 
 ```
  app.wasm ─┐  (your UI, any language that targets WASI 0.2)
@@ -12,7 +12,7 @@ two versioned contracts:
  runtime       small native C host per platform: Wasmtime + window + input
            │  chorium.h     C ABI, CHORIUM_ABI_VERSION 2
  engine        chorium.dll / libchorium.so: Chromium //content (no //chrome),
-               BGRA frames, JSON events, Tor (umbra_tor.dll, Arti), fail closed
+               JSON events, Tor (umbra_tor, Arti): fail closed, or switched off
 ```
 
 app.wasm and chorium.wasm are built once and run on every runtime; the
@@ -25,11 +25,14 @@ cycles).
 |---|---|
 | `interfaces/` | `chorium/chorium.wit`, `browser/browser.wit`, `native/chorium.h` |
 | `engine/` | the native engine (GN target, built inside the Chromium tree) |
+| `runtime/common/` | the runtime core both hosts share (contract, events, values, JSON) |
 | `runtime/win/` | Windows runtime (`build.cmd`, VS 2022 + Wasmtime 50 C API) |
+| `runtime/android/` | Android runtime: `Chorium.apk` (Java views, JNI, Wasmtime, the app) |
 | `portable/` | chorium.wasm source (C) |
-| `apps/browser/` | sample app: Chrome-style browser (tabs in the title bar, menu, Settings, History) |
+| `apps/browser/` | sample app: Chrome-style browser (tabs in the title bar on Windows, a phone layout on Android; menu, Settings, History, gestures, Tor switch) |
 | `tests/engine/` | `chorium_test.c`: loads a page through Tor, saves a .bmp |
 | `docker/` | build image and scripts (engine, wasm) |
+| `tools/` | `update_engine.sh`: check for, build and package a new Chromium release |
 
 Native programs can also use the engine directly through `chorium.h`, with no
 WebAssembly involved:
@@ -70,6 +73,16 @@ it), so Chorium does not rely on switches for the important part:
 - Chorium replaces the process command line at `chorium_init`, so the app's
   own arguments can't inject switches.
 
+**The Tor switch** (`chorium_set_tor`, `net.set-tor`; on at every start).
+Off stops Tor completely (`umbra_tor_stop`: its SOCKS port and every circuit)
+and pages connect directly; on starts it again on a new port and stays fail
+closed until it's up. Each network context gets its proxy through a live
+`ProxyConfigClient`, and every switch closes all open connections, so nothing
+made in one mode is reused in the other. Umbra's start-up also makes every
+local DNS lookup fail; Chromium reads that rule once, and direct mode needs
+DNS, so Chorium removes it. With Tor on, names are still resolved by the Tor
+exit (SOCKS5 sends host names, and there is no direct fallback).
+
 ## Building (Docker, any OS)
 
 Everything builds in the `chorium-build` image; the Chromium checkout lives
@@ -93,6 +106,18 @@ in the `chorium-work` volume. Windows is cross-compiled
 
 Builds are capped (`--cpus`, `--memory`) and run at the lowest priority
 inside the container, so the PC stays usable.
+
+**Android** (arm64): `build.sh android` builds `out/chorium-android/apks/
+Chorium.apk` (engine, runtime, Wasmtime and the app in one APK). Before it:
+the Tor library (`scripts/build_tor_core.py --os android --cpu arm64 --ndk
+<r27c root>`, with rustup's Rust and the official NDK: Chromium's NDK copy has
+no clang), Wasmtime's Android C API and the icon font in `/work/wasm-tools`,
+and the app (`build_wasm.sh app browser`). Don't run an Android and a Windows
+build in the same 10 GB container at once: Blink's heaviest files together
+run it out of memory. Install over USB with adb; the APK has DevTools on the
+abstract socket `chorium_devtools_remote` (`adb forward tcp:9333
+localabstract:chorium_devtools_remote`; GN arg `chorium_android_devtools`,
+turn it off for releases).
 
 ## Apps and chorium.wasm
 
@@ -122,24 +147,37 @@ are unpacked in the volume at `/work/wasm-tools`.
 - The kill switch covers WebAssembly too: the runtime gives WASI no network
   and no directories. Only chorium.wasm imports `pages` and `net`, everything
   goes through the engine (Tor), and files only through `files.app-data`
-  (`%LOCALAPPDATA%\Chorium\apps\<name>`: chorium.wasm keeps
-  `settings.txt` and `history.tsv` there). Settings keys: `search` (URL
-  template with `%s`), `home`, `theme` (`system`, `light`, `dark`); the
-  sample's Settings page edits them.
+  (`%LOCALAPPDATA%\Chorium\apps\<name>`, the app's files folder on Android:
+  chorium.wasm keeps `settings.txt`, `history.tsv` and `session.txt` there).
+  Settings keys: `search` (URL template with `%s`), `home`, `theme`
+  (`system`, `light`, `dark`); the sample's Settings page edits them. The
+  open tabs are saved as they change and come back at the next start
+  (`restore-session`).
+- **Android runtime**: `ChoriumActivity` starts the engine, then the app;
+  `AppView` replays the app's drawing (a display list) on a Canvas, and each
+  page is a native view under it, seen through a hole, so app menus can draw
+  over pages. The back gesture goes to the app only while it has something to
+  go back to (`surface.set-back-enabled`), else Android leaves the app.
+- Pages follow the app's theme (`pages.set-dark-mode`: prefers-color-scheme,
+  form controls, scrollbars). Long press / right click on links, images or
+  selected text arrive as `context-menu` events, Android's pull to refresh
+  and edge swipes as `overscroll` events; the app draws both. Full screen
+  (`fullscreen` event, `surface.set-fullscreen`) hides the app's UI and the
+  system bars. `surface.copy-text` puts text on the clipboard.
 
-## Limits (first version)
+## Limits
 
-- Page processes run without Chromium's sandbox. Linking the sandbox into
-  the app's .exe (like CEF's `cef_sandbox.lib`) is the next step.
-- `<select>` dropdowns and date pickers open as separate popup widgets and
-  are not in the captured frames yet.
+- Page processes run without Chromium's sandbox (a decision, for now).
+- Windows: `<select>` dropdowns draw inside the page (`appearance:
+  base-select`, injected as a user stylesheet); date pickers still open as
+  popup widgets that aren't in the captured frames.
+- No file picker or colour picker yet: `<input type=file>` and
+  `<input type=color>` do nothing (content shell has neither).
 - One device scale for all views (`chorium_init`).
 - `chorium_eval` runs in a private JavaScript world: it sees the DOM, not the
   page's own variables.
-- Windows only so far; Android is next, from the same image and volume.
 - Not in chorium.wasm yet: request blocking (needs an engine hook),
   cookie controls, downloads, dialog UI (the sample accepts dialogs).
-- Windows runtime: `net.fetch` returns an error (not wired to Chorium's network
-  service yet); no touch input; `show-keyboard` does nothing. No clipboard
-  in the contract yet, so there is no paste in app text fields.
+- `net.fetch` returns an error (not wired to Chorium's network service yet).
+  No paste in the app's own text fields (copy only).
 - The sample's text fields only edit at the end (no caret movement).

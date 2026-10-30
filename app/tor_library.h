@@ -15,7 +15,14 @@ namespace umbra {
 // Browser process only. All functions are safe to call more than once.
 class TorLibrary {
  public:
-  enum class Phase { kFailed, kStarting, kBootstrapping, kReady, kNotLoaded };
+  enum class Phase {
+    kFailed,
+    kStarting,
+    kBootstrapping,
+    kReady,
+    kNotLoaded,
+    kStopped,  // Stop() ran
+  };
 
   TorLibrary() = delete;
 
@@ -31,6 +38,14 @@ class TorLibrary {
 
   // Most recent error reported by the engine, if any.
   static std::string GetLastError();
+
+  // Stops Tor (all circuits, the SOCKS port) and returns once it has. False
+  // if the library can't stop (an older one without umbra_tor_stop).
+  static bool Stop();
+
+  // Starts Tor again after Stop(), with the folders of the first Start(). The
+  // SOCKS port is a new one.
+  static bool Restart(uint16_t* socks_port, std::string* error);
 };
 
 }  // namespace umbra

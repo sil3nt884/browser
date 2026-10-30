@@ -126,6 +126,45 @@ interface types {
     error: string,
   }
 
+  // A touch dragged past the page's edge (Android): down at the top
+  // (refresh) or sideways at a side (back, forward). The app draws the
+  // indicator and decides on release.
+  enum overscroll-kind {
+    refresh,
+    back,
+    forward,
+  }
+
+  enum overscroll-phase {
+    start,
+    pull,
+    // The finger lifted: act if it was pulled far enough.
+    release,
+    // Ended without acting (the page scrolled instead, ...).
+    cancel,
+  }
+
+  record overscroll {
+    kind: overscroll-kind,
+    phase: overscroll-phase,
+    // pull: movement since the last event, CSS pixels.
+    dx: f32,
+    dy: f32,
+  }
+
+  // A long press (touch) or right click on a link, an image or selected
+  // text. Text fields keep the system's own menu.
+  record context-menu {
+    // CSS pixels from the page's top left.
+    x: s32,
+    y: s32,
+    // Each empty when not there.
+    link-url: string,
+    link-text: string,
+    image-url: string,
+    selection: string,
+  }
+
   record eval-result {
     id: u32,
     ok: bool,
@@ -149,12 +188,18 @@ interface types {
     closed,
     // A new frame is ready; redraw if this page is visible.
     frame,
+    overscroll(overscroll),
+    context-menu(context-menu),
   }
 }
 
 // Chromium page views, with Tor underneath.
 interface pages {
   use types.{size, rect, input};
+
+  // Pages' prefers-color-scheme (and form controls, scrollbars): dark or
+  // light, for every page. Light until set.
+  set-dark-mode: func(dark: bool);
 
   resource page {
     // A page |size| CSS pixels big, starting on about:blank.
@@ -210,6 +255,13 @@ interface surface {
   show-keyboard: func(visible: bool);
   // Window title (desktop); ignored where there is none.
   set-title: func(title: string);
+  // Puts text on the system clipboard.
+  copy-text: func(text: string);
+  // Full screen (a page's video): no window frame, no system bars.
+  set-fullscreen: func(on: bool);
+  // Android: whether the back gesture goes to the app (as `back` input) or,
+  // when there is nothing to go back to, leaves the app. Ignored elsewhere.
+  set-back-enabled: func(on: bool);
 
   // System icons: Segoe Fluent Icons on Windows, Material Symbols on
   // Android. `close` is the small one for tabs; `close-window`, `minimize`,
@@ -282,6 +334,11 @@ interface net {
   fetch: func(req: request) -> result<response, string>;
   // Tor bootstrap progress 0-100, or -1 if Tor failed.
   tor-progress: func() -> s32;
+  // The Tor switch. On (the default): pages go through Tor and fail if it's
+  // down. Off: Tor is stopped and pages connect directly. Open connections
+  // are closed on every switch.
+  set-tor: func(on: bool);
+  tor-enabled: func() -> bool;
 }
 
 // Files, only inside directories the runtime grants.

@@ -1,21 +1,34 @@
 # Copyright 2026 The Umbra Authors.
 #
-# Chorium: Chromium's page engine as a library (chorium.dll / libchorium.so),
-# with Tor inside. Built on //content directly; none of //chrome is used.
+# Chorium's engine: Chromium's page engine as a library, with Tor inside.
+# Built on //content directly; none of //chrome is used.
 #
-#   autoninja -C out/chorium-win umbra/chorium/engine:chorium_test
-#
-# Output next to each other in the out dir (ship these together):
-#   chorium.dll, chorium.pak, umbra_tor.dll, icudtl.dat,
-#   snapshot_blob.bin (v8_context_snapshot.bin on native Windows builds)
+#   Windows: chorium.dll (+ chorium_test.exe)
+#     autoninja -C out/chorium-win umbra/chorium/engine:chorium_test
+#     Ship together: chorium.dll, chorium.pak, umbra_tor.dll, icudtl.dat,
+#     snapshot_blob.bin (v8_context_snapshot.bin on native Windows builds).
+#   Android: linked into the runtime's libchorium.so (runtime/android), with
+#     PageHost.java and the assets below.
 
 import("//tools/grit/repack.gni")
+
+if (is_android) {
+  import("//build/config/android/rules.gni")
+  import("//third_party/jni_zero/jni_zero.gni")
+}
+
+declare_args() {
+  # Android: Chromium's DevTools on the abstract socket
+  # "chorium_devtools_remote", for chrome://inspect over adb (only adb and
+  # the app itself may connect, as with Chrome). Turn off for releases.
+  chorium_android_devtools = true
+}
 
 config("chorium_public") {
   include_dirs = [ "//umbra/chorium/interfaces/native" ]
 }
 
-shared_library("chorium") {
+source_set("engine") {
   sources = [
     "//umbra/chorium/interfaces/native/chorium.h",
     "src/api.cc",
@@ -24,9 +37,9 @@ shared_library("chorium") {
     "src/engine.cc",
     "src/engine.h",
     "src/view.cc",
+    "src/renderer_client.cc",
+    "src/renderer_client.h",
     "src/view.h",
-    "src/window_host.cc",
-    "src/window_host.h",
   ]
   defines = [ "CHORIUM_IMPLEMENTATION" ]
   public_configs = [ ":chorium_public" ]
@@ -51,21 +64,41 @@ shared_library("chorium") {
     "//services/network:network_service",
     "//services/network/public/mojom",
     "//services/viz/privileged/mojom",
+    "//third_party/blink/public:blink_headers",
     "//third_party/blink/public/common",
-    "//ui/aura",
     "//ui/base",
     "//ui/display",
     "//ui/events",
-    "//ui/events/devices",
     "//ui/gfx",
     "//url",
     "//umbra/app",
     "//umbra/common",
   ]
-  data_deps = [
-    ":pak",
-    "//tools/v8_context_snapshot",
-  ]
+
+  if (is_android) {
+    sources += [
+      "src/android/page_host.cc",
+      "src/android/page_host.h",
+    ]
+    deps += [
+      ":chorium_engine_jni",
+      "//components/embedder_support/android:view",
+      "//net",
+      "//ui/android",
+    ]
+    if (chorium_android_devtools) {
+      defines += [ "CHORIUM_ANDROID_DEVTOOLS" ]
+    }
+  } else {
+    sources += [
+      "src/window_host.cc",
+      "src/window_host.h",
+    ]
+    deps += [
+      "//ui/aura",
+      "//ui/events/devices",
+    ]
+  }
 
   if (is_win) {
     deps += [
@@ -76,15 +109,60 @@ shared_library("chorium") {
   }
 }
 
-# A tiny C program that renders a page through Chorium and saves it as a
-# .bmp: the end-to-end check for the library.
-executable("chorium_test") {
-  sources = [ "//umbra/chorium/tests/engine/chorium_test.c" ]
-  deps = [ ":chorium" ]
-  if (is_win) {
-    deps += [ "//build/win:default_exe_manifest" ]
-    # Same stack size as chrome.exe; page processes run in this .exe too.
-    ldflags = [ "/STACK:0x800000" ]
+if (!is_android) {
+  shared_library("chorium") {
+    deps = [ ":engine" ]
+    public_configs = [ ":chorium_public" ]
+    data_deps = [
+      ":pak",
+      "//tools/v8_context_snapshot",
+    ]
+  }
+
+  # A tiny C program that renders a page through Chorium and saves it as a
+  # .bmp: the end-to-end check for the library.
+  executable("chorium_test") {
+    sources = [ "//umbra/chorium/tests/engine/chorium_test.c" ]
+    deps = [ ":chorium" ]
+    if (is_win) {
+      deps += [ "//build/win:default_exe_manifest" ]
+
+      # Same stack size as chrome.exe; page processes run in this .exe too.
+      ldflags = [ "/STACK:0x800000" ]
+    }
+  }
+}
+
+if (is_android) {
+  generate_jni("chorium_engine_jni") {
+    sources = [ "android/java/src/org/umbra/chorium/engine/PageHost.java" ]
+  }
+
+  android_library("engine_java") {
+    sources = [ "android/java/src/org/umbra/chorium/engine/PageHost.java" ]
+    srcjar_deps = [ ":chorium_engine_jni" ]
+    deps = [
+      "//base:base_java",
+      "//build/android:build_java",
+      "//components/embedder_support/android:content_view_java",
+      "//components/embedder_support/android:view_java",
+      "//content/public/android:content_java",
+      "//third_party/jni_zero:jni_zero_java",
+      "//ui/android:ui_no_recycler_view_java",
+    ]
+  }
+
+  # Everything the engine reads from the APK: its resources, V8's snapshot,
+  # ICU data, and the Tor library (extracted on first run).
+  android_assets("engine_assets") {
+    sources = [ "$root_out_dir/chorium.pak" ]
+    disable_compression = true
+    deps = [
+      ":pak",
+      "//gin:v8_snapshot_assets",
+      "//third_party/icu:icu_assets",
+      "//umbra/tor_core:runtime_assets",
+    ]
   }
 }
 

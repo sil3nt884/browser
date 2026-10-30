@@ -4,11 +4,14 @@
 // The C functions in chorium.h. Each one copies its arguments and queues the
 // work for the engine thread, which runs Chromium's browser main loop.
 
+#include <algorithm>
 #include <atomic>
 #include <string>
 #include <utility>
 
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/no_destructor.h"
@@ -28,22 +31,15 @@
 #include "sandbox/win/src/sandbox_types.h"
 #endif
 
+#if BUILDFLAG(IS_ANDROID)
+#include "umbra/chorium/engine/src/android/page_host.h"
+#endif
+
 namespace {
 
 using chorium::View;
 
 std::atomic<int> g_phase{0};  // 0 not started, 1 running, 2 stopped
-
-int RunContentMain(chorium::MainDelegate* delegate) {
-  content::ContentMainParams params(delegate);
-#if BUILDFLAG(IS_WIN)
-  params.instance = ::GetModuleHandle(nullptr);
-  static base::NoDestructor<sandbox::SandboxInterfaceInfo> sandbox_info;
-  content::InitializeSandboxInfo(sandbox_info.get());
-  params.sandbox_info = sandbox_info.get();
-#endif
-  return content::ContentMain(std::move(params));
-}
 
 chorium::MainDelegate* Delegate() {
   static base::NoDestructor<chorium::MainDelegate> delegate;
@@ -51,6 +47,15 @@ chorium::MainDelegate* Delegate() {
 }
 
 #if BUILDFLAG(IS_WIN)
+int RunContentMain(chorium::MainDelegate* delegate) {
+  content::ContentMainParams params(delegate);
+  params.instance = ::GetModuleHandle(nullptr);
+  static base::NoDestructor<sandbox::SandboxInterfaceInfo> sandbox_info;
+  content::InitializeSandboxInfo(sandbox_info.get());
+  params.sandbox_info = sandbox_info.get();
+  return content::ContentMain(std::move(params));
+}
+
 HANDLE g_engine_thread = nullptr;
 
 DWORD WINAPI EngineThreadMain(void*) {
@@ -131,11 +136,11 @@ int chorium_init(float scale) {
     g_phase = 2;
     return -1;
   }
-#else
-  return -1;
-#endif
   chorium::State().ready.Wait();
   return chorium::State().started ? 0 : -1;
+#else
+  return -1;  // Android: Java starts the engine (see chorium.h)
+#endif
 }
 
 void chorium_shutdown(void) {
@@ -157,11 +162,25 @@ void chorium_shutdown(void) {
 #endif
 }
 
+int chorium_tor_last_error(char* buf, int size) {
+  if (!buf || size <= 0) {
+    return 0;
+  }
+  // SAFETY: the C ABI promises |buf| holds |size| bytes.
+  auto out = UNSAFE_BUFFERS(base::span(buf, static_cast<size_t>(size)));
+  std::string error = umbra::TorLibrary::GetLastError();
+  size_t n = std::min(error.size(), out.size() - 1);
+  out.first(n).copy_from(base::span(error).first(n));
+  out[n] = '\0';
+  return static_cast<int>(n);
+}
+
 int chorium_tor_progress(void) {
   int percent = 0;
   switch (umbra::TorLibrary::GetStatus(&percent)) {
     case umbra::TorLibrary::Phase::kReady:
       return 100;
+    case umbra::TorLibrary::Phase::kStopped:  // switched off, or restarting
     case umbra::TorLibrary::Phase::kStarting:
       return 0;
     case umbra::TorLibrary::Phase::kBootstrapping:
@@ -178,7 +197,8 @@ chorium_view* chorium_open(int width,
                            chorium_frame_fn on_frame,
                            chorium_event_fn on_event,
                            void* user) {
-  if (g_phase != 1 || width <= 0 || height <= 0) {
+  /* chorium_init has run (desktop), or Java started the browser (Android). */
+  if (!chorium::State().started || width <= 0 || height <= 0) {
     return nullptr;
   }
   auto* handle = new chorium_view;
@@ -277,6 +297,25 @@ void chorium_text(chorium_view* view, const char* utf8) {
                               base::UTF8ToUTF16(Str(utf8))));
 }
 
+void chorium_set_tor(int on) {
+  chorium::PostToEngine(base::BindOnce(&chorium::SetTor, on != 0));
+}
+
+int chorium_tor_enabled(void) {
+  return chorium::State().tor_on ? 1 : 0;
+}
+
+void chorium_set_dark_mode(int dark) {
+  chorium::PostToEngine(base::BindOnce(
+      [](bool on) {
+        if (chorium::State().dark != on) {
+          chorium::State().dark = on;
+          chorium::View::PreferencesChanged();
+        }
+      },
+      dark != 0));
+}
+
 void chorium_focus(chorium_view* view, int focused) {
   OnView(view, base::BindOnce([](bool focused, View* v) { v->SetFocus(focused); },
                               focused != 0));
@@ -299,4 +338,32 @@ void chorium_dialog_reply(chorium_view* view,
                    id, accept != 0, base::UTF8ToUTF16(Str(text))));
 }
 
+#if BUILDFLAG(IS_ANDROID)
+void chorium_android_show_page(chorium_view* view,
+                               int x,
+                               int y,
+                               int width,
+                               int height) {
+  if (view) {
+    chorium::PostToEngine(base::BindOnce(
+        [](chorium_view* h, int x, int y, int w, int height) {
+          chorium::android::ShowPage(h, x, y, w, height);
+        },
+        base::Unretained(view), x, y, width, height));
+  }
+}
+
+void chorium_android_hide_pages(void) {
+  chorium::PostToEngine(base::BindOnce(&chorium::android::HidePages));
+}
+#endif
+
 }  // extern "C"
+
+namespace chorium {
+
+MainDelegate* GetMainDelegate() {
+  return Delegate();
+}
+
+}  // namespace chorium

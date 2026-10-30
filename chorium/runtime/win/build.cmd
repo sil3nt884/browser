@@ -18,14 +18,16 @@ call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 
 if not exist "%OUT%\obj" mkdir "%OUT%\obj"
 set FLAGS=/nologo /O2 /W4 /WX /utf-8 /MD /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
-  /wd4100 /wd4201 /I "%WASMTIME%\include" /I "%HERE%..\..\interfaces\native"
+  /wd4100 /wd4201 /I "%WASMTIME%\include" /I "%HERE%..\..\interfaces\native" ^
+  /I "%HERE%..\common"
 
 rem The Direct2D surface is C++ (DirectWrite has no C headers).
 cl %FLAGS% /std:c++17 /EHsc /c /Fo"%OUT%\obj\surface_d2d.obj" "%HERE%surface_d2d.cpp" || exit /b 1
 
 cl %FLAGS% /std:c11 ^
   /Fo"%OUT%\obj\\" /Fe"%OUT%\Chorium.exe" ^
-  "%HERE%main.c" "%HERE%contract.c" "%HERE%vals.c" "%HERE%json.c" "%HERE%loader.c" ^
+  "%HERE%main.c" "%HERE%loader.c" "%HERE%platform_win.c" ^
+  "%HERE%..\common\contract.c" "%HERE%..\common\events.c" "%HERE%..\common\vals.c" "%HERE%..\common\json.c" ^
   "%OUT%\obj\surface_d2d.obj" ^
   /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /STACK:0x800000 /MANIFEST:EMBED /MANIFESTINPUT:"%HERE%host.manifest" ^
   "%OUT%\chorium.dll.lib" "%WASMTIME%\lib\wasmtime.dll.lib" ^

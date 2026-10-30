@@ -3,6 +3,7 @@
 
 #include "umbra/chorium/engine/src/view.h"
 
+#include <cmath>
 #include <set>
 #include <utility>
 
@@ -13,6 +14,8 @@
 #include "base/no_destructor.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
+#include "build/build_config.h"
+#include "content/public/browser/context_menu_params.h"
 #include "components/input/native_web_keyboard_event.h"
 #include "components/viz/host/client_frame_sink_video_capturer.h"
 #include "content/public/browser/navigation_controller.h"
@@ -31,8 +34,8 @@
 #include "third_party/blink/public/common/input/web_mouse_event.h"
 #include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
 #include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
+#include "third_party/blink/public/mojom/context_menu/context_menu.mojom-shared.h"
 #include "third_party/blink/public/mojom/peerconnection/webrtc_ip_handling_policy.mojom.h"
-#include "ui/aura/window.h"
 #include "ui/base/page_transition_types.h"
 #include "ui/events/base_event_utils.h"
 #include "ui/events/keycodes/dom/dom_code.h"
@@ -41,8 +44,14 @@
 #include "ui/gfx/geometry/size_conversions.h"
 #include "umbra/chorium/engine/src/browser_context.h"
 #include "umbra/chorium/engine/src/engine.h"
-#include "umbra/chorium/engine/src/window_host.h"
 #include "url/gurl.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "umbra/chorium/engine/src/android/page_host.h"
+#else
+#include "ui/aura/window.h"
+#include "umbra/chorium/engine/src/window_host.h"
+#endif
 
 namespace chorium {
 
@@ -125,6 +134,13 @@ void View::Close(chorium_view* handle) {
 }
 
 // static
+void View::PreferencesChanged() {
+  for (View* view : Views()) {
+    view->web_contents_->OnWebPreferencesChanged();
+  }
+}
+
+// static
 void View::CloseAll() {
   while (!Views().empty()) {
     Close((*Views().begin())->handle_);
@@ -145,6 +161,11 @@ View::View(chorium_view* handle, int width, int height)
       blink::mojom::WebRtcIpHandlingPolicy::kDisableNonProxiedUdp;
   web_contents_->SyncRendererPrefs();
 
+#if BUILDFLAG(IS_ANDROID)
+  // A native view per page (touch, scrolling and the keyboard work as in any
+  // Android browser); the runtime places it with chorium_android_show_page.
+  android::AddPage(handle_, web_contents_.get());
+#else
   host_ = std::make_unique<WindowHost>();
   host_->InitHost();
   aura::Window* root = host_->window();
@@ -159,6 +180,7 @@ View::View(chorium_view* handle, int width, int height)
   keep_rendering_ = web_contents_->IncrementCapturerCount(
       ToPixels(size_), /*stay_hidden=*/false, /*stay_awake=*/false,
       /*is_activity=*/false);
+#endif
 
   web_contents_->GetController().LoadURL(GURL(url::kAboutBlankURL),
                                          content::Referrer(),
@@ -178,9 +200,14 @@ View::~View() {
   }
   keep_rendering_.RunAndReset();
   Observe(nullptr);
+#if BUILDFLAG(IS_ANDROID)
+  android::RemovePage(handle_);
+#endif
   web_contents_->SetDelegate(nullptr);
   web_contents_.reset();
+#if !BUILDFLAG(IS_ANDROID)
   host_.reset();
+#endif
 }
 
 void View::Emit(base::DictValue event) {
@@ -200,6 +227,9 @@ content::RenderWidgetHost* View::Widget() {
 }
 
 void View::StartCapture() {
+  if (!handle_->on_frame) {
+    return;  // the runtime shows pages itself (Android)
+  }
   content::RenderWidgetHostView* rwhv =
       web_contents_->GetRenderWidgetHostView();
   if (!rwhv) {
@@ -273,8 +303,11 @@ void View::Stop() {
 
 void View::Resize(int width, int height) {
   size_ = gfx::Size(width, height);
+#if !BUILDFLAG(IS_ANDROID)
+  // On Android the page's native view gets its size from the layout.
   web_contents_->GetNativeView()->SetBounds(gfx::Rect(size_));
   host_->SetBoundsInPixels(gfx::Rect(ToPixels(size_)));
+#endif
   if (capturer_) {
     const gfx::Size px = ToPixels(size_);
     capturer_->SetResolutionConstraints(px, px, true);
@@ -325,13 +358,25 @@ void View::Mouse(int type, int x, int y, int button, int click_count,
   widget->ForwardMouseEvent(event);
 }
 
+namespace {
+
+// A gesture of wheel events ends this long after the last one, as Chrome's
+// MouseWheelPhaseHandler does; events before then scroll the same thing.
+constexpr base::TimeDelta kWheelGestureEnd = base::Milliseconds(250);
+
+// Whole notches (the runtime sends 100 CSS pixels per notch) come from a
+// mouse wheel; anything else from a touchpad.
+bool IsNotch(float delta) {
+  return delta != 0 && std::fabs(std::fmod(delta, 100.0f)) < 0.01f;
+}
+
+}  // namespace
+
 void View::Wheel(int x, int y, float dx, float dy, int mods) {
   content::RenderWidgetHost* widget = Widget();
   if (!widget) {
     return;
   }
-  // Same two-step as DevTools' Input.dispatchMouseEvent: a "began" event with
-  // the distance, then an "ended" one so scroll latching finishes.
   blink::WebMouseWheelEvent event(blink::WebInputEvent::Type::kMouseWheel,
                                   ToBlinkModifiers(mods) | ButtonModifiers(),
                                   ui::EventTimeForNow());
@@ -341,13 +386,35 @@ void View::Wheel(int x, int y, float dx, float dy, int mods) {
   event.delta_y = -dy;
   event.wheel_ticks_x = event.delta_x == 0 ? 0 : (event.delta_x > 0 ? 1 : -1);
   event.wheel_ticks_y = event.delta_y == 0 ? 0 : (event.delta_y > 0 ? 1 : -1);
-  event.delta_units = ui::ScrollGranularity::kScrollByPrecisePixel;
-  event.phase = blink::WebMouseWheelEvent::kPhaseBegan;
+  // Mouse notches as plain pixels: Chromium animates those (smooth
+  // scrolling). Touchpad movement stays precise, following the fingers.
+  event.delta_units = (IsNotch(dx) || IsNotch(dy))
+                          ? ui::ScrollGranularity::kScrollByPixel
+                          : ui::ScrollGranularity::kScrollByPrecisePixel;
+  event.phase = wheel_active_ ? blink::WebMouseWheelEvent::kPhaseChanged
+                              : blink::WebMouseWheelEvent::kPhaseBegan;
   event.dispatch_type = blink::WebInputEvent::DispatchType::kBlocking;
   widget->ForwardWheelEvent(event);
 
-  event.delta_x = event.delta_y = 0;
-  event.wheel_ticks_x = event.wheel_ticks_y = 0;
+  wheel_active_ = true;
+  wheel_point_ = gfx::Point(x, y);
+  wheel_modifiers_ = mods;
+  wheel_end_.Start(FROM_HERE, kWheelGestureEnd,
+                   base::BindOnce(&View::EndWheel, base::Unretained(this)));
+}
+
+void View::EndWheel() {
+  wheel_active_ = false;
+  content::RenderWidgetHost* widget = Widget();
+  if (!widget) {
+    return;
+  }
+  blink::WebMouseWheelEvent event(
+      blink::WebInputEvent::Type::kMouseWheel,
+      ToBlinkModifiers(wheel_modifiers_) | ButtonModifiers(),
+      ui::EventTimeForNow());
+  event.SetPositionInWidget(wheel_point_.x(), wheel_point_.y());
+  event.SetPositionInScreen(wheel_point_.x(), wheel_point_.y());
   event.phase = blink::WebMouseWheelEvent::kPhaseEnded;
   event.dispatch_type = blink::WebInputEvent::DispatchType::kEventNonBlocking;
   widget->ForwardWheelEvent(event);
@@ -411,15 +478,24 @@ void View::Text(const std::u16string& text) {
 }
 
 void View::SetFocus(bool focused) {
+#if BUILDFLAG(IS_ANDROID)
+  // The page is a native view: Android moves focus to it when it's touched.
+  // Focusing it from here would take the keyboard from the app's own fields.
+#else
   content::RenderWidgetHost* widget = Widget();
+  // Active as well as focused: Blink only draws the caret in a focused frame
+  // of an active page, and a windowless host never gets window activation.
   if (focused) {
     web_contents_->Focus();
     if (widget) {
       widget->Focus();
+      widget->SetActive(true);
     }
   } else if (widget) {
+    widget->SetActive(false);
     widget->Blur();
   }
+#endif
 }
 
 void View::Eval(int id, const std::u16string& js) {
@@ -493,8 +569,51 @@ content::WebContents* View::OpenURLFromTab(
   return nullptr;
 }
 
+#if BUILDFLAG(IS_ANDROID)
+void View::SetOverlayMode(bool use_overlay_mode) {
+  android::SetOverlayMode(use_overlay_mode);
+}
+#endif
+
 void View::CloseContents(content::WebContents* source) {
   Emit(base::DictValue().Set("type", "closed"));
+}
+
+bool View::HandleContextMenu(content::RenderFrameHost& render_frame_host,
+                             const content::ContextMenuParams& params) {
+  bool image =
+      params.media_type == blink::mojom::ContextMenuDataMediaType::kImage &&
+      params.src_url.is_valid();
+  bool link = params.link_url.is_valid();
+  // Text fields keep their own menu (Android's paste bubble). On Android a
+  // long press on plain text selects it with the system's selection menu.
+#if BUILDFLAG(IS_ANDROID)
+  bool selection = false;
+#else
+  bool selection = !params.selection_text.empty();
+#endif
+  if (params.is_editable || (!link && !image && !selection)) {
+    return false;
+  }
+  Emit(base::DictValue()
+           .Set("type", "context_menu")
+           .Set("x", params.x)
+           .Set("y", params.y)
+           .Set("link_url", link ? params.link_url.spec() : std::string())
+           .Set("link_text", link ? params.link_text : std::u16string())
+           .Set("image_url", image ? params.src_url.spec() : std::string())
+           .Set("selection", params.selection_text));
+  return true;
+}
+
+void View::Overscroll(const char* kind, const char* phase, float dx,
+                      float dy) {
+  Emit(base::DictValue()
+           .Set("type", "overscroll")
+           .Set("kind", kind)
+           .Set("phase", phase)
+           .Set("dx", dx)
+           .Set("dy", dy));
 }
 
 content::JavaScriptDialogManager* View::GetJavaScriptDialogManager(
@@ -512,11 +631,18 @@ void View::EnterFullscreenModeForTab(
     const blink::mojom::FullscreenOptions& options) {
   fullscreen_ = true;
   Emit(base::DictValue().Set("type", "fullscreen").Set("on", true));
+  // As content shell: the page learns its new state (and size) at once.
+  if (content::RenderWidgetHost* widget = Widget()) {
+    widget->SynchronizeVisualProperties();
+  }
 }
 
 void View::ExitFullscreenModeForTab(content::WebContents* source) {
   fullscreen_ = false;
   Emit(base::DictValue().Set("type", "fullscreen").Set("on", false));
+  if (content::RenderWidgetHost* widget = Widget()) {
+    widget->SynchronizeVisualProperties();
+  }
 }
 
 bool View::IsFullscreenForTabOrPending(

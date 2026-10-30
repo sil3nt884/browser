@@ -24,7 +24,8 @@ RUN apt-get update \
 
 # Chromium's own dependency list, taken from the exact version we build.
 # --no-backwards-compatible keeps out the legacy list (Microsoft core fonts
-# and their licence prompt, snapcraft, NaCl's i386 libraries).
+# and their licence prompt, snapcraft, NaCl's i386 libraries). --android
+# adds the 32-bit libraries some Android SDK tools still need.
 RUN mkdir /tmp/ibd \
  && for f in install-build-deps.sh install-build-deps.py; do \
       curl -fsSL "https://chromium.googlesource.com/chromium/src/+/refs/tags/${CHROMIUM_TAG}/build/${f}?format=TEXT" \
@@ -32,7 +33,7 @@ RUN mkdir /tmp/ibd \
     done \
  && chmod +x /tmp/ibd/* \
  && apt-get update \
- && /tmp/ibd/install-build-deps.sh --no-prompt --no-syms --no-arm \
+ && /tmp/ibd/install-build-deps.sh --no-prompt --no-syms --no-arm --android \
       --no-chromeos-fonts --no-backwards-compatible --no-nacl \
  && rm -rf /tmp/ibd /var/lib/apt/lists/*
 

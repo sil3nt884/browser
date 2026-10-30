@@ -17,7 +17,8 @@
 package umbra:browser@0.2.0;
 
 interface browser {
-  use umbra:chorium/types@0.3.0.{size, rect, input, page-event, dialog};
+  use umbra:chorium/types@0.3.0.{size, rect, input, page-event, dialog,
+                                 overscroll, context-menu};
 
   // Tabs are numbered from 1; an id is never reused.
   type tab-id = u32;
@@ -55,6 +56,13 @@ interface browser {
     dialog(tuple<tab-id, dialog>),
     // The tab's page process crashed; it is being reloaded.
     crashed(tab-id),
+    // Pull to refresh / swipe back or forward, for the app to draw and act
+    // on (reload, back, forward).
+    overscroll(tuple<tab-id, overscroll>),
+    // A long press or right click on a link, image or selection.
+    context-menu(tuple<tab-id, context-menu>),
+    // The page went full screen (a video) or left it.
+    fullscreen(tuple<tab-id, bool>),
   }
 
   // A new tab |size| CSS pixels big, going to |text| (see navigate); empty
@@ -63,6 +71,17 @@ interface browser {
   close-tab: func(tab: tab-id);
   // Open tabs, oldest first.
   tabs: func() -> list<tab-info>;
+
+  // The open tabs and the active one are saved as they change. Reopens the
+  // saved tabs (|size| CSS pixels each) and returns the one that was
+  // active, or none if nothing was saved.
+  restore-session: func(size: size) -> option<tab-id>;
+  // Which tab the app shows, for the saved session.
+  set-active-tab: func(tab: tab-id);
+  // Leaves full screen (Back, Esc).
+  exit-fullscreen: func(tab: tab-id);
+  // Pages follow the app's theme: prefers-color-scheme dark or light.
+  set-dark-mode: func(dark: bool);
   info: func(tab: tab-id) -> option<tab-info>;
 
   // |text| is what a person typed: a URL, a host name, or words to search
@@ -100,6 +119,10 @@ interface browser {
 
   // Tor bootstrap progress 0-100, or -1 if Tor failed.
   tor-progress: func() -> s32;
+  // The Tor switch: off stops Tor and pages connect directly (see
+  // umbra:chorium/net). Always on when the engine starts.
+  set-tor: func(on: bool);
+  tor-enabled: func() -> bool;
 }
 
 // chorium.wasm.

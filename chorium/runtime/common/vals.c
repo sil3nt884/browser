@@ -6,7 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "host.h"
+#include "runtime.h"
+
+/* Portable C shared with MSVC builds, not Chromium code: Chromium's C++
+ * buffer-safety warnings don't apply. */
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+#endif
 
 static void name_set(wasm_name_t* out, const char* s) {
   wasm_byte_vec_new(out, strlen(s), s);

@@ -17,7 +17,6 @@
 
 HWND g_hwnd;
 float g_scale = 1.0f;
-host_page g_pages[MAX_PAGES + 1];
 
 static const char* const kModifiers[] = {"shift", "ctrl", "alt", "meta"};
 static int g_last_tor = -2;
@@ -40,6 +39,38 @@ static RECT g_drag[MAX_DRAG_AREAS]; /* CSS pixels, from the app */
 static size_t g_drag_count;
 static bool g_tracking_nc_leave;
 static WPARAM g_nc_pressed; /* window button under a press, or 0 */
+static bool g_fullscreen;
+static WINDOWPLACEMENT g_before_fullscreen = {sizeof(WINDOWPLACEMENT)};
+
+/* Full screen: the whole monitor is client area, no frame or title bar. */
+void surface_set_fullscreen(bool on) {
+  if (on == g_fullscreen) {
+    return;
+  }
+  g_fullscreen = on;
+  if (on) {
+    GetWindowPlacement(g_hwnd, &g_before_fullscreen);
+    MONITORINFO mi = {sizeof mi};
+    GetMonitorInfoW(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+    SetWindowLongPtrW(g_hwnd, GWL_STYLE,
+                      GetWindowLongPtrW(g_hwnd, GWL_STYLE) &
+                          ~(LONG_PTR)(WS_CAPTION | WS_THICKFRAME));
+    SetWindowPos(g_hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                 mi.rcMonitor.right - mi.rcMonitor.left,
+                 mi.rcMonitor.bottom - mi.rcMonitor.top,
+                 SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+  } else {
+    SetWindowLongPtrW(g_hwnd, GWL_STYLE,
+                      GetWindowLongPtrW(g_hwnd, GWL_STYLE) | WS_CAPTION |
+                          WS_THICKFRAME);
+    SetWindowPlacement(g_hwnd, &g_before_fullscreen);
+    SetWindowPos(g_hwnd, NULL, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOOWNERZORDER);
+  }
+}
+
+void surface_set_back_enabled(bool on) {} /* no back gesture on Windows */
 
 bool title_bar_layout(uint32_t* height, uint32_t* buttons_width,
                       bool* maximized) {
@@ -186,96 +217,6 @@ static void send_focus(bool focused) {
   app_input(v_variant("focus", &b));
 }
 
-/* --- page events -------------------------------------------------------- */
-
-static val_t string_field(const char* json, const char* key) {
-  char* s = NULL;
-  if (!json_string(json, key, &s)) {
-    return v_cstring("");
-  }
-  val_t v = v_cstring(s);
-  free(s);
-  return v;
-}
-
-static bool bool_field(const char* json, const char* key) {
-  bool b = false;
-  json_bool(json, key, &b);
-  return b;
-}
-
-static uint32_t u32_field(const char* json, const char* key) {
-  long long n = 0;
-  json_int(json, key, &n);
-  return (uint32_t)n;
-}
-
-/* chorium.dll's JSON event -> WIT page-event. False for unknown types. */
-static bool page_event_from_json(const char* json, val_t* out) {
-  char* type = NULL;
-  if (!json_string(json, "type", &type)) {
-    return false;
-  }
-  bool ok = true;
-  val_t payload;
-  if (strcmp(type, "url") == 0) {
-    static const char* const names[] = {"url", "can-go-back",
-                                        "can-go-forward"};
-    val_t fields[] = {string_field(json, "url"),
-                      v_bool(bool_field(json, "can_go_back")),
-                      v_bool(bool_field(json, "can_go_forward"))};
-    payload = v_record(3, names, fields);
-    *out = v_variant("navigated", &payload);
-  } else if (strcmp(type, "title") == 0) {
-    payload = string_field(json, "title");
-    *out = v_variant("title", &payload);
-  } else if (strcmp(type, "loading") == 0) {
-    payload = v_bool(bool_field(json, "loading"));
-    *out = v_variant("loading", &payload);
-  } else if (strcmp(type, "loaded") == 0) {
-    static const char* const names[] = {"url", "ok", "error"};
-    val_t fields[] = {string_field(json, "url"), v_bool(bool_field(json, "ok")),
-                      string_field(json, "error")};
-    payload = v_record(3, names, fields);
-    *out = v_variant("loaded", &payload);
-  } else if (strcmp(type, "new_window") == 0) {
-    payload = string_field(json, "url");
-    *out = v_variant("new-window", &payload);
-  } else if (strcmp(type, "fullscreen") == 0) {
-    payload = v_bool(bool_field(json, "on"));
-    *out = v_variant("fullscreen", &payload);
-  } else if (strcmp(type, "dialog") == 0) {
-    static const char* const names[] = {"id", "kind", "message",
-                                        "default-text"};
-    char* kind = NULL;
-    json_string(json, "kind", &kind);
-    val_t fields[] = {v_u32(u32_field(json, "id")),
-                      v_enum(kind ? kind : "alert"),
-                      string_field(json, "message"),
-                      string_field(json, "default")};
-    free(kind);
-    payload = v_record(4, names, fields);
-    *out = v_variant("dialog", &payload);
-  } else if (strcmp(type, "eval") == 0) {
-    static const char* const names[] = {"id", "ok", "json"};
-    const char* raw = "null";
-    size_t raw_len = 4;
-    json_raw(json, "result", &raw, &raw_len);
-    val_t fields[] = {v_u32(u32_field(json, "id")),
-                      v_bool(bool_field(json, "ok")), v_string(raw, raw_len)};
-    payload = v_record(3, names, fields);
-    *out = v_variant("eval-result", &payload);
-  } else if (strcmp(type, "crashed") == 0) {
-    *out = v_variant("crashed", NULL);
-  } else if (strcmp(type, "closed") == 0) {
-    *out = v_variant("closed", NULL);
-  } else {
-    ok = false;
-  }
-  free(type);
-  return ok;
-}
-
 /* --- window ------------------------------------------------------------- */
 
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp,
@@ -387,6 +328,9 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp,
 
     /* The title bar: see title_bar_hit(). */
     case WM_NCCALCSIZE:
+      if (wp && g_fullscreen) {
+        return 0; /* all client */
+      }
       if (wp) {
         /* Keep the system's side and bottom resize frame, drop its caption.
          * A maximised window hangs over the screen edge by the frame. */
@@ -398,6 +342,9 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp,
       }
       break;
     case WM_NCHITTEST: {
+      if (g_fullscreen) {
+        return HTCLIENT;
+      }
       LRESULT hit = DefWindowProcW(hwnd, msg, wp, lp);
       if (hit != HTCLIENT) {
         return hit; /* side and bottom frame */
@@ -460,21 +407,16 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp,
     case WM_APP_FRAME: {
       uint32_t id = (uint32_t)wp;
       if (id >= 1 && id <= MAX_PAGES) {
-        InterlockedExchange(&g_pages[id].frame_posted, 0);
-        if (g_pages[id].used) {
+        InterlockedExchange(&g_win_pages[id].frame_posted, 0);
+        if (page_alive(id)) {
           app_page_event(id, v_variant("frame", NULL));
         }
       }
       return 0;
     }
     case WM_APP_EVENT: {
-      uint32_t id = (uint32_t)wp;
       char* json = (char*)lp;
-      val_t event;
-      if (id >= 1 && id <= MAX_PAGES && g_pages[id].used &&
-          page_event_from_json(json, &event)) {
-        app_page_event(id, event);
-      }
+      app_engine_event((uint32_t)wp, json);
       free(json);
       return 0;
     }
@@ -515,9 +457,7 @@ int main(int argc, char** argv) {
   }
 
   g_scale = (float)GetDpiForSystem() / 96.0f;
-  for (int i = 0; i <= MAX_PAGES; ++i) {
-    InitializeCriticalSection(&g_pages[i].lock);
-  }
+  win_pages_init();
 
   if (chorium_abi_version() != CHORIUM_ABI_VERSION) {
     loader_error("chorium.dll speaks ABI %d, this Chorium.exe needs %d.",

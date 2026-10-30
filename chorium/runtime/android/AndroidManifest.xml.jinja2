@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+Copyright 2026 The Umbra Authors. Use of this source code is governed by a
+BSD-style license that can be found in the LICENSE file.
+
+Chorium's Android runtime. The services are where Chromium runs pages, the
+GPU and the network: the same native library, in their own processes.
+Based on content_shell's manifest.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="{{ manifest_package }}">
+
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+
+    <application android:name="org.umbra.chorium.runtime.ChoriumApplication"
+            android:icon="@mipmap/ic_launcher"
+            android:roundIcon="@mipmap/ic_launcher"
+            android:label="Chorium"
+            android:zygotePreloadName="org.chromium.content_public.app.ZygotePreload"
+            android:zygotePreloadNativeLib="lib{{ library_name }}.so">
+        <activity android:name="org.umbra.chorium.runtime.ChoriumActivity"
+                  android:launchMode="singleTask"
+                  android:theme="@android:style/Theme.Material.NoActionBar"
+                  android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode"
+                  android:windowSoftInputMode="adjustResize"
+                  android:hardwareAccelerated="true"
+                  android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+            </intent-filter>
+        </activity>
+
+        {% for i in range(2) %}
+        <service android:name="org.chromium.content.app.SandboxedProcessService{{ i }}"
+                 android:process=":sandboxed_process{{ i }}"
+                 {% if (i == 0) %}
+                 android:useAppZygote="true"
+                 {% endif %}
+                 android:isolatedProcess="true"
+                 android:exported="false"/>
+        {% endfor %}
+        {% for i in range(2) %}
+        <service android:name="org.chromium.content.app.NativeOnlySandboxedProcessService{{ i }}"
+            android:nativeService="true"
+            android:process=":sandboxed_process{{ i }}"
+            android:isolatedProcess="true"
+            {% if (i == 0) %}
+            android:useAppZygote="true"
+            {% endif %}
+            android:exported="false">
+            <property android:name="android.app.PROPERTY_NATIVE_SERVICE_LIBRARY_NAME"
+                android:value="lib{{ library_name }}.so"/>
+            <property android:name="android.app.PROPERTY_NATIVE_SERVICE_FUNCTION_NAME"
+                android:value="NativeChildProcessService_onCreate"/>
+        </service>
+        {% endfor %}
+
+        {% set num_privileged_services = 5 %}
+        <meta-data android:name="org.chromium.content.browser.NUM_PRIVILEGED_SERVICES"
+                   android:value="{{ num_privileged_services }}"/>
+        {% for i in range(num_privileged_services) %}
+        <service android:name="org.chromium.content.app.PrivilegedProcessService{{ i }}"
+                 android:process=":privileged_process{{ i }}"
+                 android:isolatedProcess="false"
+                 android:exported="false"/>
+        {% endfor %}
+    </application>
+</manifest>

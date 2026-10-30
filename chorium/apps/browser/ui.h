@@ -54,7 +54,7 @@ typedef enum {
   FOCUS_CUSTOM_HOME,
 } focus_t;
 
-typedef enum { PANEL_NONE, PANEL_SETTINGS, PANEL_HISTORY } panel_t;
+typedef enum { PANEL_NONE, PANEL_SETTINGS, PANEL_HISTORY, PANEL_TABS } panel_t;
 
 extern umbra_chorium_types_size_t g_size; /* surface, CSS pixels */
 extern uint32_t g_active;                 /* tab id */
@@ -62,6 +62,7 @@ extern focus_t g_focus;
 extern panel_t g_panel;
 extern bool g_menu_open;
 extern int g_hover; /* hit code under the pointer, see browser.c */
+extern bool g_phone; /* phone layout: no tab strip, touch-sized */
 
 /* --- geometry and drawing ------------------------------------------------- */
 
@@ -80,6 +81,9 @@ void icon(icon_t which, rect_t r, uint32_t c);
 void icon_centered(icon_t which, rect_t box, int size, uint32_t c);
 void clip(rect_t r);
 void unclip(void);
+/* An on/off switch (Android style), 36 x 20, centred vertically in |r| at
+ * its right edge. */
+void toggle_switch(rect_t r, bool on);
 
 /* --- strings and settings ------------------------------------------------- */
 
@@ -104,6 +108,26 @@ void field_text(field_t* f, const app_string_t* s);
 void field_draw(const field_t* f, rect_t r, int x, float size, bool focused,
                 const char* placeholder);
 
+/* --- gestures.c ----------------------------------------------------------- */
+
+/* Hit codes of the long-press menu (panels.c has 400-410 and 500+). */
+enum {
+  HIT_CTX_ITEM = 430, /* + item */
+  HIT_CTX_CARD = 440,
+  HIT_CTX_DISMISS = 450,
+};
+
+void overscroll_event(const umbra_browser_browser_overscroll_t* o);
+/* The pull / swipe indicator over the page area |page|. */
+void overscroll_draw(rect_t page);
+void context_menu_open(const umbra_browser_browser_context_menu_t* m,
+                       rect_t page);
+bool context_menu_is_open(void);
+void context_menu_close(void);
+void context_menu_draw(void);
+int context_menu_hit(int x, int y);
+void context_menu_click(int code);
+
 /* --- panels.c ------------------------------------------------------------- */
 
 rect_t menu_rect(void);
@@ -116,12 +140,26 @@ void panel_open(panel_t panel);
 void panel_wheel(float dy);
 bool panel_key(const keypress_t* k);
 void panel_text(const app_string_t* s);
+/* The tab switcher row a hit code is on, or -1. */
+int tab_row_of(int code);
+void close_tab_row(int index);
+/* A row being swiped sideways (to close it): its index or -1, and offset. */
+extern int g_swipe_row;
+extern int g_swipe_dx;
 
 /* --- browser.c (used by panels.c) ----------------------------------------- */
 
 /* A new tab on the home page, with the address field focused (Ctrl+T). */
 void new_tab(void);
 void navigate_active(const char* text);
+void switch_tab(uint32_t id);
+/* Closes a tab; if it was active another becomes active (or a new one). */
+void close_tab(uint32_t id);
+void go_forward(void);
+void reload_or_stop(void);
+/* A new tab for |text| (as typed in the address field); stays behind the
+ * current one unless |foreground|. */
+void open_tab_with(const char* text, bool foreground);
 void request_draw(void);
 /* Where the page area starts: below the tab strip and toolbar. */
 int chrome_top(void);

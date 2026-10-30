@@ -34,6 +34,9 @@ struct Api {
   umbra_tor_start_fn start = nullptr;
   umbra_tor_status_fn status = nullptr;
   umbra_tor_last_error_fn last_error = nullptr;
+  umbra_tor_stop_fn stop = nullptr;  // optional
+  // From the first Start(), for Restart().
+  base::FilePath state_dir, cache_dir;
 };
 
 Api& GetApi() {
@@ -145,6 +148,8 @@ bool EnsureLoaded() {
       base::GetFunctionPointerFromNativeLibrary(lib, "umbra_tor_status"));
   api.last_error = reinterpret_cast<umbra_tor_last_error_fn>(
       base::GetFunctionPointerFromNativeLibrary(lib, "umbra_tor_last_error"));
+  api.stop = reinterpret_cast<umbra_tor_stop_fn>(
+      base::GetFunctionPointerFromNativeLibrary(lib, "umbra_tor_stop"));
 
   if (!api.abi_version || !api.start || !api.status || !api.last_error) {
     api.load_error = "umbra_tor library is missing exports";
@@ -176,6 +181,8 @@ bool TorLibrary::Start(const base::FilePath& state_dir,
     *error = "could not create Tor directories";
     return false;
   }
+  GetApi().state_dir = state_dir;
+  GetApi().cache_dir = cache_dir;
   const std::string state = state_dir.AsUTF8Unsafe();
   const std::string cache = cache_dir.AsUTF8Unsafe();
   uint16_t port = 0;
@@ -209,9 +216,28 @@ TorLibrary::Phase TorLibrary::GetStatus(int* percent) {
       return Phase::kBootstrapping;
     case UMBRA_TOR_PHASE_STARTING:
       return Phase::kStarting;
+    case UMBRA_TOR_PHASE_STOPPED:
+      return Phase::kStopped;
     default:
       return Phase::kFailed;
   }
+}
+
+// static
+bool TorLibrary::Stop() {
+  if (!GetApi().loaded || !GetApi().stop) {
+    return false;
+  }
+  return GetApi().stop() == UMBRA_TOR_OK;
+}
+
+// static
+bool TorLibrary::Restart(uint16_t* socks_port, std::string* error) {
+  if (GetApi().state_dir.empty()) {
+    *error = "Tor was never started";
+    return false;
+  }
+  return Start(GetApi().state_dir, GetApi().cache_dir, socks_port, error);
 }
 
 // static

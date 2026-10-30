@@ -1,0 +1,173 @@
+# Copyright 2026 The Umbra Authors.
+#
+# Chorium's Android runtime: Chorium.apk, holding libchorium.so (the engine,
+# the shared runtime core and the Android platform layer in one library),
+# the runtime's and the engine's Java, Wasmtime, and the app.
+#
+#   docker ... chorium-build:157 bash /umbra/chorium/docker/build.sh android
+#   -> out/chorium-android/apks/Chorium.apk
+
+import("//build/config/android/config.gni")
+import("//build/config/android/rules.gni")
+import("//chrome/version.gni")  # version variables only; no //chrome code
+import("//third_party/jni_zero/jni_zero.gni")
+
+declare_args() {
+  # Wasmtime's C API for Android (bytecodealliance/wasmtime releases).
+  chorium_wasmtime_dir =
+      "/work/wasm-tools/wasmtime-v50.0.1-aarch64-android-c-api"
+
+  # The composed app to ship (chorium/docker/build_wasm.sh app browser).
+  chorium_app_wasm = "/work/wasm/out/browser.wasm"
+
+  # Material Icons font (google/material-design-icons, Apache 2.0).
+  chorium_icon_font = "/work/wasm-tools/fonts/MaterialIcons-Regular.ttf"
+}
+
+config("wasmtime") {
+  # -isystem: Wasmtime's headers aren't held to Chromium's warning flags.
+  cflags = [
+    "-isystem",
+    rebase_path("$chorium_wasmtime_dir/include", root_build_dir),
+  ]
+}
+
+generate_jni("runtime_jni") {
+  sources = [
+    "java/src/org/umbra/chorium/runtime/AppView.java",
+    "java/src/org/umbra/chorium/runtime/ChoriumNatives.java",
+  ]
+}
+
+# The shared runtime core (runtime/common): portable C, also built by MSVC
+# for Windows. Chromium's clang plugin asks for raw_ptr<T>, which C can't use.
+source_set("runtime_core") {
+  sources = [
+    "../common/contract.c",
+    "../common/events.c",
+    "../common/json.c",
+    "../common/runtime.h",
+    "../common/vals.c",
+  ]
+  public_configs = [ ":runtime_core_headers" ]
+  configs += [ ":wasmtime" ]
+  configs -= [ "//build/config/clang:find_bad_constructs" ]
+  deps = [ "//umbra/chorium/engine" ]
+}
+
+config("runtime_core_headers") {
+  include_dirs = [ "../common" ]
+}
+
+shared_library_with_jni("libchorium") {
+  sources = [
+    "jni/jni_onload.cc",
+    "jni/runtime_android.cc",
+  ]
+  configs += [ ":wasmtime" ]
+  deps = [
+    ":runtime_core",
+    ":runtime_jni",
+    "//base",
+    "//content/public/app",
+    "//umbra/chorium/engine",
+  ]
+  # By name: Wasmtime's libwasmtime.so has no SONAME, so linking it by path
+  # would record that build path as the library to load.
+  lib_dirs = [ "$chorium_wasmtime_dir/lib" ]
+  libs = [ "wasmtime" ]
+  java_targets = [ ":chorium_apk" ]
+
+  # The engine's native deps pull in a few components (policy, prefs, sign-in,
+  # ...) whose Java side this small APK doesn't ship, and some Java classes
+  # come without their native side: drop the unused methods, stub the rest.
+  remove_uncalled_jni = true
+  add_stubs_for_missing_jni = true
+
+  # Chromium's native-only child services look up an exported entry point.
+  configs -= [ "//build/config/android:hide_all_but_jni_onload" ]
+  configs += [ "//build/config/android:hide_all_but_jni" ]
+}
+
+android_library("runtime_java") {
+  sources = [
+    "java/src/org/umbra/chorium/runtime/AppView.java",
+    "java/src/org/umbra/chorium/runtime/ChoriumActivity.java",
+    "java/src/org/umbra/chorium/runtime/ChoriumApplication.java",
+    "java/src/org/umbra/chorium/runtime/ChoriumNatives.java",
+  ]
+  srcjar_deps = [ ":runtime_jni" ]
+  deps = [
+    "//base:base_java",
+    "//build/android:build_java",
+    "//content/public/android:content_java",
+    "//net/android:net_java",
+    "//third_party/jni_zero:jni_zero_java",
+    "//ui/android:ui_no_recycler_view_java",
+    "//umbra/chorium/engine:engine_java",
+  ]
+}
+
+# The app icon: an adaptive icon (vector layers, with a monochrome layer for
+# themed icons).
+android_resources("runtime_resources") {
+  sources = [
+    "res/drawable/ic_launcher_background.xml",
+    "res/drawable/ic_launcher_foreground.xml",
+    "res/drawable/ic_launcher_monochrome.xml",
+    "res/mipmap-anydpi-v26/ic_launcher.xml",
+  ]
+}
+
+jinja_template("chorium_manifest") {
+  input = "AndroidManifest.xml.jinja2"
+  output = "$target_gen_dir/chorium_manifest/AndroidManifest.xml"
+  variables = [
+    "manifest_package=org.umbra.chorium",
+    "library_name=chorium",
+  ]
+}
+
+android_assets("runtime_assets") {
+  renaming_sources = [
+    chorium_app_wasm,
+    chorium_icon_font,
+  ]
+  renaming_destinations = [
+    "apps/browser.wasm",
+    "fonts/MaterialIcons-Regular.ttf",
+  ]
+  disable_compression = true
+}
+
+android_apk("chorium_apk") {
+  apk_name = "Chorium"
+  # Chromium reads its version from the APK on Android (the user agent among
+  # others); without these it reports 9999.0.0.0.
+  version_name = chrome_version_name
+  version_code = chrome_version_code
+  android_manifest = "$target_gen_dir/chorium_manifest/AndroidManifest.xml"
+  android_manifest_dep = ":chorium_manifest"
+  shared_libraries = [ ":libchorium" ]
+  srcjar_deps = [ ":libchorium__jni_registration" ]
+  loadable_modules = [ "$chorium_wasmtime_dir/lib/libwasmtime.so" ]
+  deps = [
+    ":runtime_assets",
+    ":runtime_java",
+    ":runtime_resources",
+    "//base:base_java",
+    # Java that native code looks up by name (as content shell has it):
+    # without it the GPU process aborts (InputTransferHandlerViz), and media
+    # and downloads would too.
+    "//components/download/internal/common:internal_java",
+    "//components/embedder_support/android:view_java",
+    "//components/viz/service:service_java",
+    "//content/public/android:content_java",
+    "//media/base/android:media_java",
+    "//media/capture/video/android:capture_java",
+    "//net/android:net_java",
+    "//ui/android:ui_java",
+    "//umbra/chorium/engine:engine_assets",
+    "//umbra/chorium/engine:engine_java",
+  ]
+}

@@ -22,6 +22,8 @@ use crate::socks::{self, ConnectError, Connector, Target};
 pub const PHASE_STARTING: i32 = 0;
 pub const PHASE_BOOTSTRAPPING: i32 = 1;
 pub const PHASE_READY: i32 = 2;
+/// umbra_tor_stop ran; nothing is listening.
+pub const PHASE_STOPPED: i32 = 3;
 pub const PHASE_FAILED: i32 = -1;
 
 pub static PHASE: AtomicI32 = AtomicI32::new(PHASE_STARTING);
@@ -117,8 +119,13 @@ fn map_error(kind: ErrorKind) -> ConnectError {
     }
 }
 
-/// Runs forever on the engine thread's tokio runtime.
-pub async fn run(listener: std::net::TcpListener, dirs: Dirs) {
+/// Runs on the engine thread's tokio runtime until |stop| fires (or is
+/// dropped); returning drops the client, its circuits and the listener.
+pub async fn run(
+    listener: std::net::TcpListener,
+    dirs: Dirs,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+) {
     let listener = match TcpListener::from_std(listener) {
         Ok(l) => l,
         Err(e) => {
@@ -190,7 +197,14 @@ pub async fn run(listener: std::net::TcpListener, dirs: Dirs) {
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS));
 
     loop {
-        let (sock, peer) = match listener.accept().await {
+        let accepted = tokio::select! {
+            _ = &mut stop => {
+                tracing::info!("tor stopping");
+                return;
+            }
+            accepted = listener.accept() => accepted,
+        };
+        let (sock, peer) = match accepted {
             Ok(x) => x,
             Err(e) => {
                 tracing::warn!("accept failed: {e}");

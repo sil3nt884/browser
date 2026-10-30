@@ -9,6 +9,11 @@
 #     -e WIN_TOOLCHAIN_HASH=<zip name> \
 #     chorium-build:157 bash /umbra/chorium/docker/build.sh win [ninja targets]
 #
+# Android (arm64) needs no SDK mount: build.sh android -> apks/Chorium.apk.
+# Before it: the Tor library (prebuilt/android/arm64, build_tor_core.py),
+# Wasmtime's Android C API and the icon font in /work/wasm-tools, and the
+# app (OUT=/work/wasm/out build_wasm.sh app browser).
+#
 # The Windows SDK only works on a case-insensitive file system. Chromium
 # normally mounts one with FUSE (ciopfs), which needs a privileged container;
 # instead the SDK lives on NTFS (case-insensitive) and is bind-mounted over
@@ -21,8 +26,30 @@ set -euo pipefail
 
 TARGET=${1:-win}
 shift || true
-ROOT_TARGET=//umbra/chorium/engine:chorium_test
-NINJA_TARGETS=("${@:-${ROOT_TARGET#//}}")
+case $TARGET in
+  win)
+    ROOT_TARGET=//umbra/chorium/engine:chorium_test
+    CPU=${CPU:-x64}
+    ;;
+  android)
+    # The whole runtime: Chorium.apk (engine, runtime, Wasmtime, the app).
+    ROOT_TARGET=//umbra/chorium/runtime/android:chorium_apk
+    CPU=${CPU:-arm64}
+    ;;
+  *)
+    echo "build.sh: unknown target $TARGET (win, android)" >&2
+    exit 1
+    ;;
+esac
+# Extra arguments go to ninja. If none of them names a target (only flags
+# such as -k 0), build the default one: plain ninja would build everything
+# in the build files, host tools included.
+NINJA_ARGS=("$@")
+has_target=false
+for arg in "$@"; do
+  [[ $arg == */* || $arg == *:* ]] && has_target=true
+done
+$has_target || NINJA_ARGS+=("${ROOT_TARGET#//}")
 JOBS=${JOBS:-8}
 SRC=/work/chromium/src
 OUT=out/chorium-$TARGET
@@ -44,7 +71,7 @@ rm -f "$SRC/$OUT/.ninja_lock"
   echo
   echo "# Chorium ($TARGET)"
   echo "target_os = \"$TARGET\""
-  echo 'target_cpu = "x64"'
+  echo "target_cpu = \"$CPU\""
   # Ninja, not Siso: //umbra is a symlink to a folder outside the checkout.
   echo 'use_siso = false'
   # Not an arg: makes a new root target count as changed args (below).
@@ -62,10 +89,13 @@ else
 fi
 echo "BUILD START $(date -u +%FT%TZ)"
 # Lowest CPU and disk priority inside the container, on top of its caps.
-nice -n 19 ionice -c3 autoninja -C "$OUT" -j "$JOBS" "${NINJA_TARGETS[@]}"
+nice -n 19 ionice -c3 autoninja -C "$OUT" -j "$JOBS" "${NINJA_ARGS[@]}"
 echo "BUILD DONE $(date -u +%FT%TZ)"
 if [[ -f $OUT/chorium.dll ]]; then
   # umbra_tor.dll comes from prebuilt/; cross builds ship snapshot_blob.bin.
   ls -la "$OUT"/chorium.dll "$OUT"/chorium.pak "$OUT"/chorium_test.exe \
          "$OUT"/icudtl.dat "$OUT"/snapshot_blob.bin
+fi
+if [[ -f $OUT/apks/Chorium.apk ]]; then
+  ls -la "$OUT"/apks/Chorium.apk
 fi

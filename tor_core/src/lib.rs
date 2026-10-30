@@ -20,7 +20,8 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::OnceLock;
+use std::sync::Mutex;
+use std::thread::JoinHandle;
 
 /// Bumped whenever the C ABI changes shape.
 pub const ABI_VERSION: u32 = 1;
@@ -31,7 +32,14 @@ pub const ERR_BIND: i32 = -2;
 pub const ERR_THREAD: i32 = -3;
 pub const ERR_PANIC: i32 = -4;
 
-static STARTED_PORT: OnceLock<u16> = OnceLock::new();
+/// The running engine: its SOCKS port, how to stop it, and its thread.
+struct Running {
+    port: u16,
+    stop: tokio::sync::oneshot::Sender<()>,
+    thread: JoinHandle<()>,
+}
+
+static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
 
 #[no_mangle]
 pub extern "C" fn umbra_tor_abi_version() -> u32 {
@@ -74,9 +82,13 @@ pub unsafe extern "C" fn umbra_tor_start(
 }
 
 fn start_inner(state: PathBuf, cache: PathBuf) -> Result<u16, i32> {
-    if let Some(port) = STARTED_PORT.get() {
-        return Ok(*port);
+    let mut running = RUNNING.lock().map_err(|_| ERR_THREAD)?;
+    if let Some(r) = running.as_ref() {
+        return Ok(r.port);
     }
+    // A start after umbra_tor_stop begins again from scratch.
+    engine::PHASE.store(engine::PHASE_STARTING, Ordering::SeqCst);
+    engine::PERCENT.store(0, Ordering::SeqCst);
     init_logging();
     // Must happen before Arti opens its first TLS channel. Err just means a
     // provider is already installed (e.g. start called after a host did it).
@@ -92,7 +104,8 @@ fn start_inner(state: PathBuf, cache: PathBuf) -> Result<u16, i32> {
     let port = listener.local_addr().map_err(|_| ERR_BIND)?.port();
 
     let dirs = engine::Dirs { state, cache };
-    std::thread::Builder::new()
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let thread = std::thread::Builder::new()
         .name("umbra-tor".into())
         .spawn(move || {
             let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -108,7 +121,8 @@ fn start_inner(state: PathBuf, cache: PathBuf) -> Result<u16, i32> {
                     return;
                 }
             };
-            let outcome = catch_unwind(AssertUnwindSafe(|| rt.block_on(engine::run(listener, dirs))));
+            let outcome =
+                catch_unwind(AssertUnwindSafe(|| rt.block_on(engine::run(listener, dirs, stopped))));
             if outcome.is_err() {
                 engine::PHASE.store(engine::PHASE_FAILED, Ordering::SeqCst);
                 engine::set_error("tor engine panicked");
@@ -116,8 +130,26 @@ fn start_inner(state: PathBuf, cache: PathBuf) -> Result<u16, i32> {
         })
         .map_err(|_| ERR_THREAD)?;
 
-    let _ = STARTED_PORT.set(port);
+    *running = Some(Running { port, stop, thread });
     Ok(port)
+}
+
+/// Stops Tor: closes the SOCKS port and every circuit, and returns once the
+/// engine's thread has ended. umbra_tor_start may be called again afterwards
+/// (a new port). Not part of ABI 1's required exports: callers look it up.
+#[no_mangle]
+pub extern "C" fn umbra_tor_stop() -> i32 {
+    let running = match RUNNING.lock() {
+        Ok(mut r) => r.take(),
+        Err(_) => return ERR_THREAD,
+    };
+    if let Some(r) = running {
+        let _ = r.stop.send(());
+        let _ = r.thread.join();
+    }
+    engine::PHASE.store(engine::PHASE_STOPPED, Ordering::SeqCst);
+    engine::PERCENT.store(0, Ordering::SeqCst);
+    OK
 }
 
 /// Returns the lifecycle phase (0 starting, 1 bootstrapping, 2 ready,

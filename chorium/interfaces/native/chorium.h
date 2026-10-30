@@ -10,7 +10,8 @@
  *
  * Threads: every function may be called from any thread. Calls are queued to
  * the engine thread and return at once. Callbacks run on the engine thread:
- * keep them short and copy what you need.
+ * keep them short and copy what you need. (On Android the engine thread is
+ * the app's main thread; see the Android section at the end.)
  *
  * Minimal program:
  *
@@ -61,7 +62,8 @@ typedef void (*chorium_frame_fn)(chorium_view* view,
                                  int stride,
                                  void* user);
 
-/* Something happened in the page, as one JSON object with a "type" field:
+/* Something happened in the page, as one JSON object with a "type" field
+ * (skip types you don't know):
  *   {"type":"url","url":"...","can_go_back":true,"can_go_forward":false}
  *                                           a navigation committed
  *   {"type":"title","title":"..."}
@@ -77,6 +79,12 @@ typedef void (*chorium_frame_fn)(chorium_view* view,
  *   {"type":"eval","id":3,"ok":true,"result":<JSON value>}
  *   {"type":"crashed"}                      page process died; reload it
  *   {"type":"closed"}                       page called window.close()
+ *   {"type":"overscroll","kind":"refresh|back|forward",
+ *    "phase":"start|pull|release|cancel","dx":0.0,"dy":12.5}
+ *                                           Android: pulled past the page's
+ *                                           edge (dx, dy: CSS pixels moved)
+ *   {"type":"context_menu","x":10,"y":20,"link_url":"...","link_text":"...",
+ *    "image_url":"...","selection":"..."}   long press / right click
  */
 typedef void (*chorium_event_fn)(chorium_view* view,
                                  const char* json,
@@ -102,6 +110,22 @@ CHORIUM_API void chorium_shutdown(void);
 
 /* Tor bootstrap progress 0-100, or -1 if Tor failed (pages then fail). */
 CHORIUM_API int chorium_tor_progress(void);
+
+/* Tor's most recent error (e.g. why bootstrap is retrying), copied into
+ * |buf| (|size| bytes, always NUL-terminated); returns its length, 0 if
+ * none. */
+CHORIUM_API int chorium_tor_last_error(char* buf, int size);
+
+/* Pages' prefers-color-scheme (and form controls, scrollbars): dark (1) or
+ * light (0). Light until set; applies to open pages at once. */
+CHORIUM_API void chorium_set_dark_mode(int dark);
+
+/* The Tor switch. On (the default): every page goes through Tor, and fails
+ * if Tor is down (never directly). Off: Tor is stopped and pages connect
+ * directly. Switching closes all open connections. Takes effect at once;
+ * Tor needs a few seconds to connect again after being switched back on. */
+CHORIUM_API void chorium_set_tor(int on);
+CHORIUM_API int chorium_tor_enabled(void);
 
 /* A page view, |width| x |height| CSS pixels. Starts on about:blank. */
 CHORIUM_API chorium_view* chorium_open(int width,
@@ -173,6 +197,24 @@ CHORIUM_API void chorium_dialog_reply(chorium_view* view,
                                       int id,
                                       int accept,
                                       const char* text);
+
+#if defined(__ANDROID__)
+/* Android. The engine lives in the app's process and is started from Java
+ * (BrowserStartupController); chorium_init, chorium_shutdown and
+ * chorium_execute_process are not used. Pages are real Android views, so
+ * open them with a NULL frame callback (no frames are captured) and place
+ * the one to show:
+ *
+ * Shows |view|'s page at (x, y, width, height), in pixels of the page host
+ * view (see PageHost.java). One page shows at a time. */
+CHORIUM_API void chorium_android_show_page(chorium_view* view,
+                                           int x,
+                                           int y,
+                                           int width,
+                                           int height);
+/* Hides whichever page is showing. */
+CHORIUM_API void chorium_android_hide_pages(void);
+#endif
 
 #ifdef __cplusplus
 } /* extern "C" */

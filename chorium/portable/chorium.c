@@ -26,6 +26,9 @@ typedef umbra_chorium_types_size_t size_t2;
 #define MAX_HISTORY 1000
 #define SETTINGS_FILE "settings.txt"
 #define HISTORY_FILE "history.tsv"
+/* The open tabs: "active\t<index>" and then one URL per line, oldest tab
+ * first. Saved as they change, read by restore-session. */
+#define SESSION_FILE "session.txt"
 #define DEFAULT_SEARCH "https://html.duckduckgo.com/html/?q=%s"
 #define DEFAULT_HOME "https://html.duckduckgo.com/html/"
 
@@ -61,6 +64,7 @@ static visit_t g_history[MAX_HISTORY];
 static size_t g_history_len;
 static setting_t* g_settings;
 static size_t g_settings_len;
+static uint32_t g_active_tab; /* set-active-tab, for the session */
 
 /* --- strings -------------------------------------------------------------- */
 
@@ -503,6 +507,50 @@ static void close_tab(tab_t* t) {
   memset(t, 0, sizeof *t);
 }
 
+/* Tabs in the order they were opened (ids grow; slots get reused). */
+static size_t ordered_tabs(tab_t** order) {
+  size_t n = 0;
+  for (int i = 0; i < MAX_TABS; ++i) {
+    if (g_tabs[i].used) {
+      size_t j = n++;
+      while (j > 0 && order[j - 1]->id > g_tabs[i].id) {
+        order[j] = order[j - 1];
+        --j;
+      }
+      order[j] = &g_tabs[i];
+    }
+  }
+  return n;
+}
+
+static void save_session(void) {
+  tab_t* order[MAX_TABS];
+  size_t n = ordered_tabs(order);
+  size_t active = 0;
+  buf_t b = {0};
+  buf_add(&b, "");
+  size_t saved = 0;
+  char line[48];
+  for (size_t i = 0; i < n; ++i) {
+    if (!order[i]->url[0] || strncmp(order[i]->url, "about:", 6) == 0) {
+      continue; /* nothing to come back to */
+    }
+    if (order[i]->id == g_active_tab) {
+      active = saved;
+    }
+    buf_add_clean(&b, order[i]->url);
+    buf_add(&b, "\n");
+    ++saved;
+  }
+  snprintf(line, sizeof line, "active\t%zu\n", active);
+  buf_t out = {0};
+  buf_add(&out, line);
+  buf_add(&out, b.p);
+  write_file(SESSION_FILE, out.p, out.len);
+  free(b.p);
+  free(out.p);
+}
+
 /* --- exports: tabs -------------------------------------------------------- */
 
 exports_umbra_browser_browser_tab_id_t exports_umbra_browser_browser_open_tab(
@@ -519,6 +567,59 @@ void exports_umbra_browser_browser_close_tab(
   tab_t* t = tab(id);
   if (t) {
     close_tab(t);
+    save_session();
+  }
+}
+
+bool exports_umbra_browser_browser_restore_session(
+    exports_umbra_browser_browser_size_t* size, uint32_t* ret) {
+  ready();
+  char* text = read_file(SESSION_FILE);
+  if (!text) {
+    return false;
+  }
+  size_t active = 0, i = 0;
+  uint32_t shown = 0;
+  char* save = NULL;
+  for (char* line = strtok_r(text, "\n", &save); line;
+       line = strtok_r(NULL, "\n", &save)) {
+    if (strncmp(line, "active\t", 7) == 0) {
+      active = (size_t)strtoul(line + 7, NULL, 10);
+      continue;
+    }
+    tab_t* t = new_tab(line, *size);
+    if (t && (i == active || !shown)) {
+      shown = t->id;
+    }
+    ++i;
+  }
+  free(text);
+  if (!shown) {
+    return false;
+  }
+  g_active_tab = shown;
+  *ret = shown;
+  return true;
+}
+
+void exports_umbra_browser_browser_set_active_tab(
+    exports_umbra_browser_browser_tab_id_t id) {
+  if (g_active_tab != id) {
+    g_active_tab = id;
+    save_session();
+  }
+}
+
+void exports_umbra_browser_browser_set_dark_mode(bool dark) {
+  umbra_chorium_pages_set_dark_mode(dark);
+}
+
+void exports_umbra_browser_browser_exit_fullscreen(
+    exports_umbra_browser_browser_tab_id_t id) {
+  tab_t* t = tab(id);
+  if (t) {
+    str_t js = to_str("document.fullscreenElement && document.exitFullscreen()");
+    umbra_chorium_pages_method_page_eval(page(t), 0, &js);
   }
 }
 
@@ -526,17 +627,7 @@ void exports_umbra_browser_browser_tabs(
     exports_umbra_browser_browser_list_tab_info_t* ret) {
   /* Slots get reused, ids don't: sort by id for "oldest first". */
   tab_t* order[MAX_TABS];
-  size_t n = 0;
-  for (int i = 0; i < MAX_TABS; ++i) {
-    if (g_tabs[i].used) {
-      size_t j = n++;
-      while (j > 0 && order[j - 1]->id > g_tabs[i].id) {
-        order[j] = order[j - 1];
-        --j;
-      }
-      order[j] = &g_tabs[i];
-    }
-  }
+  size_t n = ordered_tabs(order);
   ret->len = n;
   ret->ptr = n ? malloc(sizeof(tab_info_t) * n) : NULL;
   for (size_t i = 0; i < n; ++i) {
@@ -682,6 +773,7 @@ void exports_umbra_browser_browser_handle_page_event(
       t->can_go_back = ev->val.navigated.can_go_back;
       t->can_go_forward = ev->val.navigated.can_go_forward;
       add_event(ret, changed(t));
+      save_session();
       break;
     }
     case UMBRA_CHORIUM_TYPES_PAGE_EVENT_TITLE: {
@@ -756,8 +848,28 @@ void exports_umbra_browser_browser_handle_page_event(
       e.val.frame = t->id;
       add_event(ret, e);
       break;
+    case UMBRA_CHORIUM_TYPES_PAGE_EVENT_FULLSCREEN:
+      e.tag = EXPORTS_UMBRA_BROWSER_BROWSER_BROWSER_EVENT_FULLSCREEN;
+      e.val.fullscreen.f0 = t->id;
+      e.val.fullscreen.f1 = ev->val.fullscreen;
+      add_event(ret, e);
+      break;
+    case UMBRA_CHORIUM_TYPES_PAGE_EVENT_OVERSCROLL:
+      e.tag = EXPORTS_UMBRA_BROWSER_BROWSER_BROWSER_EVENT_OVERSCROLL;
+      e.val.overscroll.f0 = t->id;
+      e.val.overscroll.f1 = ev->val.overscroll;
+      add_event(ret, e);
+      break;
+    case UMBRA_CHORIUM_TYPES_PAGE_EVENT_CONTEXT_MENU:
+      /* Hand the strings over, as for dialogs. */
+      e.tag = EXPORTS_UMBRA_BROWSER_BROWSER_BROWSER_EVENT_CONTEXT_MENU;
+      e.val.context_menu.f0 = t->id;
+      e.val.context_menu.f1 = ev->val.context_menu;
+      memset(&ev->val.context_menu, 0, sizeof ev->val.context_menu);
+      add_event(ret, e);
+      break;
     default:
-      /* fullscreen, eval-result: nothing in the browser interface yet. */
+      /* eval-result: nothing in the browser interface yet. */
       break;
   }
   exports_umbra_browser_browser_page_event_free(ev);
@@ -831,4 +943,12 @@ void exports_umbra_browser_browser_set_setting(str_t* key, str_t* value) {
 
 int32_t exports_umbra_browser_browser_tor_progress(void) {
   return umbra_chorium_net_tor_progress();
+}
+
+void exports_umbra_browser_browser_set_tor(bool on) {
+  umbra_chorium_net_set_tor(on);
+}
+
+bool exports_umbra_browser_browser_tor_enabled(void) {
+  return umbra_chorium_net_tor_enabled();
 }

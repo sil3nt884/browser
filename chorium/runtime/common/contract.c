@@ -1,9 +1,10 @@
 /* Copyright 2026 The Umbra Authors. Use of this source code is governed by a
  * BSD-style license that can be found in the LICENSE file.
  *
- * The host side of chorium.wit: loads the app with Wasmtime, defines every
- * import, and calls the app's exports. Everything here runs on the UI
- * thread; Chromium's callbacks only copy data and post messages.
+ * The runtime side of chorium.wit, shared by every platform: loads the app
+ * with Wasmtime, defines every import, and calls the app's exports.
+ * Everything here runs on the UI thread; the platform gets engine callbacks
+ * there (runtime.h).
  *
  * The kill switch holds for apps too: WASI gets no network (no sockets, no
  * name lookup) and no directories, so pages and app files go only through
@@ -13,9 +14,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <shlobj.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dirent.h>
+#include <sys/stat.h>
+#endif
 
-#include "host.h"
+#include "runtime.h"
+
+/* Portable C shared with MSVC builds, not Chromium code: Chromium's C++
+ * buffer-safety warnings don't apply. */
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+#endif
 
 #define PKG "umbra:chorium/"
 #define VER "@0.3.0"
@@ -35,8 +47,15 @@ static bool g_dead;  /* the app trapped; it can't be entered again */
 static bool g_started; /* start has run; nothing else is called before it */
 static int g_depth;  /* calls into the app in progress */
 static uint32_t g_next_page = 1;
-static wchar_t g_app_dir[MAX_PATH]; /* files.app-data */
+static char g_app_dir[1024]; /* files.app-data, UTF-8 */
 static char g_last_error[1024];
+
+/* Open pages, by id (the `page` resource's rep). */
+typedef struct {
+  bool used;
+  chorium_view* view;
+} page_t;
+static page_t g_pages[MAX_PAGES + 1];
 
 static const char* const kModifiers[] = {"shift", "ctrl", "alt", "meta"};
 
@@ -103,7 +122,7 @@ static wasmtime_error_t* own_resource(wasmtime_context_t* ctx, uint32_t type,
 static bool g_trace; /* CHORIUM_HOST_TRACE=1: log calls in and out */
 
 /* The page behind a borrow<page> argument, or NULL. */
-static host_page* arg_page(wasmtime_context_t* ctx, const val_t* v) {
+static page_t* arg_page(wasmtime_context_t* ctx, const val_t* v) {
   uint32_t rep = 0;
   if (g_trace) {
     fprintf(stderr, "[trace]   page arg kind=%d owned=%d\n", v ? v->kind : -1,
@@ -125,10 +144,12 @@ static host_page* arg_page(wasmtime_context_t* ctx, const val_t* v) {
       size_t nargs, val_t* results, size_t nresults)
 
 #define PAGE_ARG()                                  \
-  host_page* page = arg_page(ctx, &args[0]);        \
+  page_t* page = arg_page(ctx, &args[0]);           \
   if (!page) {                                      \
     return trap("chorium: not a live page");        \
-  }
+  }                                                 \
+  uint32_t page_id = (uint32_t)(page - g_pages);    \
+  (void)page_id
 
 static uint32_t field_u32(const val_t* record, const char* name) {
   const val_t* v = r_field(record, name);
@@ -147,71 +168,33 @@ static float field_f32(const val_t* record, const char* name) {
 
 /* --- pages -------------------------------------------------------------- */
 
-void page_frame(chorium_view* view, const uint8_t* bgra, int width,
-                int height, int stride, void* user) {
-  uint32_t id = (uint32_t)(uintptr_t)user;
-  host_page* page = &g_pages[id];
-  size_t row = (size_t)width * 4;
-  size_t need = row * (size_t)height;
-  EnterCriticalSection(&page->lock);
-  if (page->closing) {
-    LeaveCriticalSection(&page->lock);
-    return;
-  }
-  if (page->frame_cap < need) {
-    free(page->frame);
-    page->frame = malloc(need);
-    page->frame_cap = page->frame ? need : 0;
-  }
-  if (page->frame) {
-    for (int y = 0; y < height; ++y) {
-      memcpy(page->frame + row * (size_t)y, bgra + (size_t)stride * y, row);
-    }
-    page->frame_w = width;
-    page->frame_h = height;
-    ++page->frame_seq;
-  }
-  LeaveCriticalSection(&page->lock);
-  /* One message at a time; the app redraws with the newest frame anyway. */
-  if (InterlockedExchange(&page->frame_posted, 1) == 0) {
-    PostMessageW(g_hwnd, WM_APP_FRAME, id, 0);
-  }
+bool page_alive(uint32_t page_id) {
+  return page_id >= 1 && page_id <= MAX_PAGES && g_pages[page_id].used;
 }
 
-void page_event(chorium_view* view, const char* json, void* user) {
-  char* copy = _strdup(json);
-  if (copy && !PostMessageW(g_hwnd, WM_APP_EVENT,
-                            (WPARAM)(uintptr_t)user, (LPARAM)copy)) {
-    free(copy);
-  }
+chorium_view* page_view(uint32_t page_id) {
+  return page_alive(page_id) ? g_pages[page_id].view : NULL;
 }
 
-static void page_close(host_page* page) {
-  chorium_close(page->view);
-  surface_forget_page(page);
-  page->used = false;
-  page->view = NULL;
-  EnterCriticalSection(&page->lock);
-  page->closing = true;
-  free(page->frame);
-  page->frame = NULL;
-  page->frame_cap = 0;
-  page->frame_w = page->frame_h = 0;
-  LeaveCriticalSection(&page->lock);
+static void page_close(uint32_t id) {
+  chorium_close(g_pages[id].view);
+  g_pages[id].used = false;
+  g_pages[id].view = NULL;
+  platform_page_closed(id);
 }
 
 void pages_close_all(void) {
   for (uint32_t i = 1; i <= MAX_PAGES; ++i) {
     if (g_pages[i].used) {
-      page_close(&g_pages[i]);
+      page_close(i);
     }
   }
 }
 
 static wasmtime_error_t* page_destructor(void* data, wasmtime_context_t* ctx,
                                          uint32_t rep) {
-  if (rep >= 1 && rep <= MAX_PAGES && g_pages[rep].used) {
-    page_close(&g_pages[rep]);
+  if (page_alive(rep)) {
+    page_close(rep);
   }
   return NULL;
 }
@@ -223,9 +206,10 @@ HOSTFN(page_new) {
     return trap("chorium: too many pages");
   }
   uint32_t id = g_next_page++;
-  host_page* page = &g_pages[id];
-  page->view = chorium_open(w ? (int)w : 1, h ? (int)h : 1, page_frame,
-                            page_event, (void*)(uintptr_t)id);
+  page_t* page = &g_pages[id];
+  page->view = chorium_open(w ? (int)w : 1, h ? (int)h : 1,
+                            platform_frame_callback(), platform_page_event,
+                            (void*)(uintptr_t)id);
   if (!page->view) {
     return trap("chorium: could not open a page");
   }
@@ -235,7 +219,7 @@ HOSTFN(page_new) {
 
 HOSTFN(page_id) {
   PAGE_ARG();
-  results[0] = v_u32((uint32_t)(page - g_pages));
+  results[0] = v_u32(page_id);
   return NULL;
 }
 
@@ -374,7 +358,7 @@ HOSTFN(surface_dimensions_fn) {
 }
 
 HOSTFN(surface_scale_fn) {
-  results[0] = v_f32(g_scale);
+  results[0] = v_f32(surface_scale());
   return NULL;
 }
 
@@ -415,9 +399,14 @@ HOSTFN(surface_measure_text_fn) {
   return NULL;
 }
 
+HOSTFN(pages_set_dark_mode) {
+  chorium_set_dark_mode(args[0].of.boolean);
+  return NULL;
+}
+
 HOSTFN(page_draw) {
   PAGE_ARG();
-  surface_draw_page(page, RECT_ARGS(&args[1]));
+  surface_draw_page(page_id, RECT_ARGS(&args[1]));
   return NULL;
 }
 
@@ -436,7 +425,10 @@ HOSTFN(surface_present_fn) {
   return NULL;
 }
 
-HOSTFN(surface_show_keyboard_fn) { return NULL; /* no on-screen keyboard */ }
+HOSTFN(surface_show_keyboard_fn) {
+  surface_show_keyboard(args[0].of.boolean);
+  return NULL;
+}
 
 static const char* const kIcons[] = {
     "back",     "forward",  "reload",   "stop",    "close",
@@ -491,13 +483,22 @@ HOSTFN(surface_set_drag_areas_fn) {
 }
 
 HOSTFN(surface_set_title_fn) {
-  const wasm_name_t* s = &args[0].of.string;
-  int n = MultiByteToWideChar(CP_UTF8, 0, s->data, (int)s->size, NULL, 0);
-  wchar_t* w = malloc(sizeof(wchar_t) * (size_t)(n + 1));
-  MultiByteToWideChar(CP_UTF8, 0, s->data, (int)s->size, w, n);
-  w[n] = 0;
-  SetWindowTextW(g_hwnd, w);
-  free(w);
+  surface_set_title(args[0].of.string.data, args[0].of.string.size);
+  return NULL;
+}
+
+HOSTFN(surface_copy_text_fn) {
+  surface_copy_text(args[0].of.string.data, args[0].of.string.size);
+  return NULL;
+}
+
+HOSTFN(surface_set_fullscreen_fn) {
+  surface_set_fullscreen(args[0].of.boolean);
+  return NULL;
+}
+
+HOSTFN(surface_set_back_enabled_fn) {
+  surface_set_back_enabled(args[0].of.boolean);
   return NULL;
 }
 
@@ -515,10 +516,48 @@ HOSTFN(net_tor_progress_fn) {
   return NULL;
 }
 
+HOSTFN(net_set_tor_fn) {
+  bool on = args[0].of.boolean;
+  chorium_set_tor(on);
+  if (on) {
+    platform_tor_restarted();
+  }
+  return NULL;
+}
+
+HOSTFN(net_tor_enabled_fn) {
+  results[0] = v_bool(chorium_tor_enabled() != 0);
+  return NULL;
+}
+
 /* --- files -------------------------------------------------------------- */
 
-/* A plain file name inside the app's directory, or NULL. */
-static wchar_t* app_file(const val_t* name) {
+/* UTF-8 paths on every platform: Windows needs its wide-character calls. */
+static FILE* open_file(const char* path, const char* mode) {
+#ifdef _WIN32
+  wchar_t wpath[1024], wmode[8];
+  if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024) ||
+      !MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, 8)) {
+    return NULL;
+  }
+  return _wfopen(wpath, wmode);
+#else
+  return fopen(path, mode);
+#endif
+}
+
+static bool remove_file(const char* path) {
+#ifdef _WIN32
+  wchar_t wpath[1024];
+  return MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024) &&
+         _wremove(wpath) == 0;
+#else
+  return remove(path) == 0;
+#endif
+}
+
+/* A plain file name inside the app's directory, or NULL. free() it. */
+static char* app_file(const val_t* name) {
   const wasm_name_t* s = &name->of.string;
   if (s->size == 0 || s->size > 200) {
     return NULL;
@@ -533,15 +572,9 @@ static wchar_t* app_file(const val_t* name) {
       (s->size == 2 && s->data[0] == '.' && s->data[1] == '.')) {
     return NULL;
   }
-  wchar_t leaf[256];
-  int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s->data,
-                              (int)s->size, leaf, 255);
-  if (n <= 0) {
-    return NULL;
-  }
-  leaf[n] = 0;
-  wchar_t* path = malloc(sizeof(wchar_t) * (MAX_PATH + 256));
-  swprintf(path, MAX_PATH + 256, L"%ls\\%ls", g_app_dir, leaf);
+  size_t cap = strlen(g_app_dir) + s->size + 2;
+  char* path = malloc(cap);
+  snprintf(path, cap, "%s/%.*s", g_app_dir, (int)s->size, s->data);
   return path;
 }
 
@@ -567,33 +600,28 @@ static wasmtime_error_t* dir_destructor(void* data, wasmtime_context_t* ctx,
 
 HOSTFN(dir_read_fn) {
   DIR_ARG();
-  wchar_t* path = app_file(&args[1]);
+  char* path = app_file(&args[1]);
   if (!path) {
     results[0] = err_val("bad file name");
     return NULL;
   }
-  HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
-                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  FILE* f = open_file(path, "rb");
   free(path);
-  LARGE_INTEGER size;
-  if (f == INVALID_HANDLE_VALUE) {
+  if (!f) {
     results[0] = err_val("not found");
     return NULL;
   }
-  if (!GetFileSizeEx(f, &size) || size.QuadPart > 64 * 1024 * 1024) {
-    CloseHandle(f);
+  fseek(f, 0, SEEK_END);
+  long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (size < 0 || size > 64 * 1024 * 1024) {
+    fclose(f);
     results[0] = err_val("too big");
     return NULL;
   }
-  uint8_t* data = malloc((size_t)size.QuadPart + 1);
-  DWORD got = 0;
-  BOOL ok = ReadFile(f, data, (DWORD)size.QuadPart, &got, NULL);
-  CloseHandle(f);
-  if (!ok) {
-    free(data);
-    results[0] = err_val("read failed");
-    return NULL;
-  }
+  uint8_t* data = malloc((size_t)size + 1);
+  size_t got = fread(data, 1, (size_t)size, f);
+  fclose(f);
   val_t bytes = v_bytes(data, got);
   free(data);
   results[0] = v_result(true, &bytes);
@@ -602,7 +630,7 @@ HOSTFN(dir_read_fn) {
 
 HOSTFN(dir_write_fn) {
   DIR_ARG();
-  wchar_t* path = app_file(&args[1]);
+  char* path = app_file(&args[1]);
   if (!path) {
     results[0] = err_val("bad file name");
     return NULL;
@@ -612,15 +640,11 @@ HOSTFN(dir_write_fn) {
   for (size_t i = 0; i < list->size; ++i) {
     data[i] = list->data[i].of.u8;
   }
-  HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                         FILE_ATTRIBUTE_NORMAL, NULL);
+  FILE* f = open_file(path, "wb");
   free(path);
-  DWORD wrote = 0;
-  BOOL ok = f != INVALID_HANDLE_VALUE &&
-            WriteFile(f, data, (DWORD)list->size, &wrote, NULL) &&
-            wrote == list->size;
-  if (f != INVALID_HANDLE_VALUE) {
-    CloseHandle(f);
+  bool ok = f && fwrite(data, 1, list->size, f) == list->size;
+  if (f && fclose(f) != 0) {
+    ok = false;
   }
   free(data);
   results[0] = ok ? v_result(true, NULL) : err_val("write failed");
@@ -629,12 +653,12 @@ HOSTFN(dir_write_fn) {
 
 HOSTFN(dir_remove_fn) {
   DIR_ARG();
-  wchar_t* path = app_file(&args[1]);
+  char* path = app_file(&args[1]);
   if (!path) {
     results[0] = err_val("bad file name");
     return NULL;
   }
-  BOOL ok = DeleteFileW(path);
+  bool ok = remove_file(path);
   free(path);
   results[0] = ok ? v_result(true, NULL) : err_val("remove failed");
   return NULL;
@@ -642,31 +666,48 @@ HOSTFN(dir_remove_fn) {
 
 HOSTFN(dir_names_fn) {
   DIR_ARG();
-  wchar_t pattern[MAX_PATH + 4];
-  swprintf(pattern, MAX_PATH + 4, L"%ls\\*", g_app_dir);
-  WIN32_FIND_DATAW found;
   size_t count = 0, cap = 16;
   val_t* names = malloc(sizeof(val_t) * cap);
-  HANDLE h = FindFirstFileW(pattern, &found);
-  if (h != INVALID_HANDLE_VALUE) {
-    do {
-      if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-        continue;
-      }
-      char utf8[1024];
-      int n = WideCharToMultiByte(CP_UTF8, 0, found.cFileName, -1, utf8,
-                                  sizeof utf8, NULL, NULL);
-      if (n <= 1) {
-        continue;
-      }
-      if (count == cap) {
-        cap *= 2;
-        names = realloc(names, sizeof(val_t) * cap);
-      }
-      names[count++] = v_string(utf8, (size_t)n - 1);
-    } while (FindNextFileW(h, &found));
-    FindClose(h);
+#define ADD_NAME(utf8, len)                             \
+  do {                                                  \
+    if (count == cap) {                                 \
+      cap *= 2;                                         \
+      names = realloc(names, sizeof(val_t) * cap);      \
+    }                                                   \
+    names[count++] = v_string((utf8), (len));           \
+  } while (0)
+#ifdef _WIN32
+  wchar_t pattern[1100];
+  int n = MultiByteToWideChar(CP_UTF8, 0, g_app_dir, -1, pattern, 1090);
+  if (n > 0) {
+    wcscpy(pattern + n - 1, L"\\*");
+    WIN32_FIND_DATAW found;
+    HANDLE h = FindFirstFileW(pattern, &found);
+    if (h != INVALID_HANDLE_VALUE) {
+      do {
+        char utf8[1024];
+        int len = WideCharToMultiByte(CP_UTF8, 0, found.cFileName, -1, utf8,
+                                      sizeof utf8, NULL, NULL);
+        if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && len > 1) {
+          ADD_NAME(utf8, (size_t)len - 1);
+        }
+      } while (FindNextFileW(h, &found));
+      FindClose(h);
+    }
   }
+#else
+  DIR* d = opendir(g_app_dir);
+  if (d) {
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+      if (e->d_type == DT_REG) {
+        ADD_NAME(e->d_name, strlen(e->d_name));
+      }
+    }
+    closedir(d);
+  }
+#endif
+#undef ADD_NAME
   results[0] = v_list(count, names);
   free(names);
   return NULL;
@@ -680,8 +721,7 @@ HOSTFN(log_write_fn) {
   if (r_name_is(e, "debug")) level = "debug";
   if (r_name_is(e, "warn")) level = "warn";
   if (r_name_is(e, "error")) level = "error";
-  fprintf(stderr, "[app %s] %.*s\n", level, (int)args[1].of.string.size,
-          args[1].of.string.data);
+  platform_log(level, args[1].of.string.data, args[1].of.string.size);
   return NULL;
 }
 
@@ -728,6 +768,7 @@ static bool add_resource(wasmtime_component_linker_instance_t* li,
 
 static bool define_imports(void) {
   static const func_def pages[] = {
+      {"set-dark-mode", pages_set_dark_mode},
       {"[constructor]page", page_new},
       {"[method]page.id", page_id},
       {"[method]page.load-url", page_load_url},
@@ -756,6 +797,9 @@ static bool define_imports(void) {
       {"present", surface_present_fn},
       {"show-keyboard", surface_show_keyboard_fn},
       {"set-title", surface_set_title_fn},
+      {"copy-text", surface_copy_text_fn},
+      {"set-fullscreen", surface_set_fullscreen_fn},
+      {"set-back-enabled", surface_set_back_enabled_fn},
       {"draw-icon", surface_draw_icon_fn},
       {"dark-mode", surface_dark_mode_fn},
       {"title-bar-layout", surface_title_bar_layout_fn},
@@ -764,6 +808,8 @@ static bool define_imports(void) {
   static const func_def net[] = {
       {"fetch", net_fetch_fn},
       {"tor-progress", net_tor_progress_fn},
+      {"set-tor", net_set_tor_fn},
+      {"tor-enabled", net_tor_enabled_fn},
   };
   static const func_def files[] = {
       {"app-data", files_app_data_fn},
@@ -805,54 +851,44 @@ static bool define_imports(void) {
   return ok;
 }
 
-/* %LOCALAPPDATA%\Chorium\apps\<app file name without .wasm> */
-static void make_app_dir(const char* wasm_path) {
-  wchar_t base[MAX_PATH];
-  if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE,
-                              NULL, 0, base))) {
-    GetTempPathW(MAX_PATH, base);
+bool contract_load(const char* wasm_path) {
+  FILE* f = open_file(wasm_path, "rb");
+  if (!f) {
+    snprintf(g_last_error, sizeof g_last_error, "can't open %s", wasm_path);
+    return false;
   }
+  fseek(f, 0, SEEK_END);
+  long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  uint8_t* bytes = malloc(size > 0 ? (size_t)size : 1);
+  size_t got = fread(bytes, 1, size > 0 ? (size_t)size : 0, f);
+  fclose(f);
+
+  /* The app's name is its file name without ".wasm". */
   const char* leaf = wasm_path;
   for (const char* p = wasm_path; *p; ++p) {
     if (*p == '\\' || *p == '/') {
       leaf = p + 1;
     }
   }
-  wchar_t name[128];
-  int n = MultiByteToWideChar(CP_ACP, 0, leaf, -1, name, 127);
-  name[n > 0 ? n - 1 : 0] = 0;
-  wchar_t* dot = wcsrchr(name, L'.');
+  char name[128];
+  snprintf(name, sizeof name, "%s", leaf);
+  char* dot = strrchr(name, '.');
   if (dot) {
-    *dot = 0;
+    *dot = '\0';
   }
-  swprintf(g_app_dir, MAX_PATH, L"%ls\\Chorium", base);
-  CreateDirectoryW(g_app_dir, NULL);
-  wcscat_s(g_app_dir, MAX_PATH, L"\\apps");
-  CreateDirectoryW(g_app_dir, NULL);
-  wcscat_s(g_app_dir, MAX_PATH, L"\\");
-  wcscat_s(g_app_dir, MAX_PATH, name);
-  CreateDirectoryW(g_app_dir, NULL);
+  bool ok = contract_load_bytes(bytes, got, name);
+  free(bytes);
+  return ok;
 }
 
-bool contract_load(const char* wasm_path) {
+bool contract_load_bytes(const uint8_t* bytes, size_t len,
+                         const char* app_name) {
+  contract_unload(); /* a previous run in this process (Android) */
   g_trace = getenv("CHORIUM_HOST_TRACE") != NULL;
-  FILE* f = fopen(wasm_path, "rb");
-  if (!f) {
-    fprintf(stderr, "[host] can't open %s\n", wasm_path);
-    return false;
-  }
-  fseek(f, 0, SEEK_END);
-  long size = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  uint8_t* bytes = malloc((size_t)size);
-  size_t got = fread(bytes, 1, (size_t)size, f);
-  fclose(f);
-
   g_engine = wasm_engine_new();
-  wasmtime_error_t* error =
-      wasmtime_component_new(g_engine, bytes, got, &g_component);
-  free(bytes);
-  if (!check("compiling the app", error)) {
+  if (!check("compiling the app",
+             wasmtime_component_new(g_engine, bytes, len, &g_component))) {
     return false;
   }
 
@@ -872,7 +908,11 @@ bool contract_load(const char* wasm_path) {
       !define_imports()) {
     return false;
   }
-  make_app_dir(wasm_path);
+  if (!platform_app_data_dir(app_name, g_app_dir, sizeof g_app_dir)) {
+    snprintf(g_last_error, sizeof g_last_error,
+             "no folder for the app's files");
+    return false;
+  }
   if (!check("instantiating the app",
              wasmtime_component_linker_instantiate(g_linker, g_ctx,
                                                    g_component,
@@ -901,6 +941,10 @@ void contract_unload(void) {
     g_engine = NULL;
   }
   g_loaded = false;
+  /* The next load starts a new app (Android reopens the activity in the
+   * same process). */
+  g_dead = false;
+  g_started = false;
 }
 
 /* --- calling the app ---------------------------------------------------- */
@@ -920,7 +964,7 @@ static void call(const char* name, val_t* args, size_t nargs) {
   if (g_depth > 0) {
     /* Never re-enter the app; only redraws are worth keeping. */
     if (strcmp(name, "on-draw") == 0) {
-      PostMessageW(g_hwnd, WM_APP_DRAW, 0, 0);
+      platform_request_draw();
     }
     goto done;
   }
@@ -948,8 +992,7 @@ static void call(const char* name, val_t* args, size_t nargs) {
   if (error) {
     print_error(name, error, NULL);
     g_dead = true;
-    loader_error("The app stopped with an error.\n\n%s", g_last_error);
-    PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+    platform_app_crashed(g_last_error);
   }
 done:
   for (size_t i = 0; i < nargs; ++i) {

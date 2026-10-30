@@ -1,9 +1,10 @@
 /* Copyright 2026 The Umbra Authors. Use of this source code is governed by a
  * BSD-style license that can be found in the LICENSE file.
  *
- * The browser's own pages and menu: the ⋮ menu, Settings and History. They
- * are drawn by the app over the page area, like chrome://settings, and keep
- * their data in chorium.wasm (settings and history).
+ * The browser's own pages and menu: the ⋮ menu, Settings, History and (on
+ * phones) the tab switcher. They are drawn by the app over the page area,
+ * like chrome://settings, and keep their data in chorium.wasm (settings and
+ * history).
  */
 #include <stdio.h>
 #include <string.h>
@@ -15,10 +16,16 @@
 enum {
   HIT_MENU_ITEM = 400, /* + item */
   HIT_MENU_BG = 410,
+  HIT_MENU_ICON = 420, /* + icon in the phone menu's top row */
   HIT_ROW = 500,      /* + settings row */
   HIT_HISTORY = 600,  /* + history entry */
   HIT_CLEAR = 800,
+  HIT_TABS_NEW = 801,
+  HIT_TAB_ROW = 900,       /* + tab index */
+  HIT_TAB_ROW_CLOSE = 1000, /* + tab index */
 };
+
+#define TAB_ROWS_MAX 100
 
 #define VK_ESCAPE 0x1B
 #define HISTORY_LIMIT 200
@@ -35,20 +42,35 @@ static const menu_item_t kMenu[] = {
     {ICON(ADD), "New tab", "Ctrl+T"},
     {ICON(HISTORY), "History", "Ctrl+H"},
     {ICON(SETTINGS), "Settings", ""},
+    {ICON(LOCK), "Tor", ""}, /* with a switch */
 };
+#define MENU_TOR 3
 #define MENU_COUNT (int)(sizeof kMenu / sizeof kMenu[0])
-#define MENU_ITEM_H 36
+#define MENU_ITEM_H (g_phone ? 48 : 36)
+#define MENU_ICONS_H 56 /* phones: Forward and Reload above the items */
+
+static int menu_top_row(void) { return g_phone ? MENU_ICONS_H : 0; }
 
 rect_t menu_rect(void) {
-  int w = 260;
+  int w = g_phone ? 240 : 260;
   /* Below the ⋮ button, right-aligned with it. */
-  return rect((int)g_size.width - w - 8, 0, w, MENU_COUNT * MENU_ITEM_H + 16);
+  return rect((int)g_size.width - w - (g_phone ? 4 : 8), 0, w,
+              menu_top_row() + MENU_COUNT * MENU_ITEM_H + 16);
 }
 
 static rect_t menu_box(void) {
   rect_t r = menu_rect();
-  r.y = chrome_top() - 4;
+  r.y = g_phone ? 4 : chrome_top() - 4; /* phones: over the button */
   return r;
+}
+
+static rect_t menu_item(rect_t box, int i) {
+  return rect(box.x, box.y + 8 + menu_top_row() + i * MENU_ITEM_H,
+              (int)box.width, MENU_ITEM_H);
+}
+
+static rect_t menu_icon(rect_t box, int i) {
+  return rect(box.x + 8 + i * 56, box.y + 4, 56, MENU_ICONS_H);
 }
 
 void menu_draw(void) {
@@ -56,17 +78,40 @@ void menu_draw(void) {
   fill_round(rect(r.x - 1, r.y + 1, (int)r.width + 2, (int)r.height + 3), 9,
              T->shadow);
   fill_round(r, 8, T->card);
+  if (g_phone) {
+    tab_info_t info;
+    bool have = umbra_browser_browser_info(g_active, &info);
+    bool forward = have && info.can_go_forward && g_panel == PANEL_NONE;
+    bool loading = have && info.loading;
+    if (have) {
+      umbra_browser_browser_tab_info_free(&info);
+    }
+    for (int i = 0; i < 2; ++i) {
+      bool enabled = i == 0 ? forward : g_panel == PANEL_NONE;
+      rect_t b = menu_icon(r, i);
+      if (enabled && g_hover == HIT_MENU_ICON + i) {
+        circle(b.x + 28, b.y + 28, 22, T->hover);
+      }
+      icon_centered(i == 0 ? ICON(FORWARD) : loading ? ICON(STOP) : ICON(RELOAD),
+                    b, 22, enabled ? T->icon : T->icon_off);
+    }
+    fill(rect(r.x, r.y + 8 + MENU_ICONS_H - 4, (int)r.width, 1),
+         T->separator);
+  }
   for (int i = 0; i < MENU_COUNT; ++i) {
-    rect_t row = rect(r.x, r.y + 8 + i * MENU_ITEM_H, (int)r.width,
-                      MENU_ITEM_H);
+    rect_t row = menu_item(r, i);
     if (g_hover == HIT_MENU_ITEM + i) {
       fill(row, T->hover);
     }
     icon_centered(kMenu[i].icon, rect(row.x + 12, row.y, 24, MENU_ITEM_H),
-                  16, T->icon);
-    text_in(rect(row.x + 48, row.y, 150, MENU_ITEM_H), kMenu[i].label, 14,
-            T->text);
-    if (kMenu[i].keys[0]) {
+                  g_phone ? 20 : 16, T->icon);
+    text_in(rect(row.x + 48, row.y, 150, MENU_ITEM_H), kMenu[i].label,
+            g_phone ? 15 : 14, T->text);
+    if (i == MENU_TOR) {
+      toggle_switch(rect(row.x, row.y, (int)row.width - 16, MENU_ITEM_H),
+                    umbra_browser_browser_tor_enabled());
+    }
+    if (kMenu[i].keys[0] && !g_phone) {
       int w = text_width(kMenu[i].keys, 12.5f);
       text_in(rect(row.x + (int)row.width - 16 - w, row.y, w + 2, MENU_ITEM_H),
               kMenu[i].keys, 12.5f, T->text_dim);
@@ -107,6 +152,7 @@ typedef enum {
   ROW_FIELD,
   ROW_NOTE,
   ROW_CLEAR,
+  ROW_TOGGLE, /* the Tor switch */
 } row_kind_t;
 
 typedef struct {
@@ -122,9 +168,11 @@ typedef struct {
 #define MAX_ROWS 24
 static row_t g_rows[MAX_ROWS];
 static int g_row_count;
-static rect_t g_cards[4];
-static const char* g_card_titles[4] = {"Search engine", "On startup and new tabs",
-                                       "Appearance", "Privacy"};
+#define CARDS 5
+static rect_t g_cards[CARDS];
+static const char* g_card_titles[CARDS] = {
+    "Connection", "Search engine", "On startup and new tabs", "Appearance",
+    "Privacy"};
 static int g_card_count;
 static int g_content_h;
 
@@ -179,7 +227,9 @@ static void add_choices(int group, const choice_t* list, int count,
                         int* y, int x, int w) {
   int pick = chosen(list, count, key, custom_chosen);
   for (int i = 0; i < count; ++i) {
-    add_row(ROW_RADIO, y, x, w, 44, list[i].label, list[i].note, i == pick,
+    /* Phones put a note on a second line. */
+    int h = g_phone && list[i].note[0] ? 60 : g_phone ? 52 : 44;
+    add_row(ROW_RADIO, y, x, w, h, list[i].label, list[i].note, i == pick,
             group, i);
   }
   if (field && pick == count - 1) {
@@ -191,30 +241,42 @@ static void add_choices(int group, const choice_t* list, int count,
 }
 
 /* Lays out the settings page in |area|: rows and cards. */
+static int column_width(rect_t area, int max) {
+  int w = (int)area.width - (g_phone ? 24 : 48);
+  return w < max ? w : max;
+}
+
 static void build_settings(rect_t area) {
   g_row_count = 0;
   g_card_count = 0;
-  int w = (int)area.width - 48 < 680 ? (int)area.width - 48 : 680;
+  int w = column_width(area, 680);
   int x = area.x + ((int)area.width - w) / 2;
   int y = area.y + 72 - g_scroll;
-  for (int card = 0; card < 4; ++card) {
+  for (int card = 0; card < CARDS; ++card) {
     y += 36; /* section title */
     int start = y;
     switch (card) {
       case 0:
+        add_row(ROW_TOGGLE, &y, x, w, 64, "Connect through Tor",
+                umbra_browser_browser_tor_enabled()
+                    ? "On: pages go through Tor, or fail if it's down"
+                    : "Off: Tor is stopped and pages connect directly",
+                umbra_browser_browser_tor_enabled(), 4, 0);
+        break;
+      case 1:
         add_choices(0, kSearch, COUNT(kSearch), "search",
                     g_search_custom_chosen, &g_custom_search, &y, x, w);
         break;
-      case 1:
+      case 2:
         add_choices(1, kHome, COUNT(kHome), "home", g_home_custom_chosen,
                     &g_custom_home, &y, x, w);
         break;
-      case 2:
+      case 3:
         add_choices(2, kTheme, COUNT(kTheme), "theme", false, NULL, &y, x, w);
         break;
-      case 3:
+      case 4:
         add_row(ROW_CLEAR, &y, x, w, 56, "Clear browsing history",
-                "pages you visited, kept on this computer", false, 3, 0);
+                "pages you visited, kept on this device", false, 3, 0);
         break;
     }
     g_cards[g_card_count++] = rect(x, start, w, y - start);
@@ -264,9 +326,20 @@ static void draw_settings(rect_t area) {
         if (hover) {
           fill(rect(r.x, r.y, (int)r.width, (int)r.height), T->hover);
         }
-        radio(r.x + 24, r.y + 22, row->selected);
-        text_in(rect(r.x + 48, r.y, (int)r.width - 56, 44), row->label, 14,
-                T->text);
+        const char* label = row->label;
+        if (g_phone && row->group == 2 && row->index == 0) {
+          label = "Same as system";
+        }
+        radio(r.x + 24, r.y + (int)r.height / 2, row->selected);
+        if (g_phone && row->note[0]) {
+          text_in(rect(r.x + 48, r.y + 8, (int)r.width - 56, 22), label, 15,
+                  T->text);
+          text_in(rect(r.x + 48, r.y + 30, (int)r.width - 56, 20), row->note,
+                  12.5f, T->text_dim);
+          break;
+        }
+        text_in(rect(r.x + 48, r.y, (int)r.width - 56, (int)r.height), label,
+                g_phone ? 15 : 14, T->text);
         if (row->note[0]) {
           int lw = text_width(row->label, 14);
           text_in(rect(r.x + 48 + lw + 10, r.y, (int)r.width - lw - 66, 44),
@@ -293,9 +366,22 @@ static void draw_settings(rect_t area) {
         text_in(rect(r.x + 48, r.y, (int)r.width - 56, (int)r.height),
                 row->label, 12.5f, T->error);
         break;
+      case ROW_TOGGLE:
+        if (hover) {
+          fill(r, T->hover);
+        }
+        text_in(rect(r.x + 20, r.y + 12, (int)r.width - 90, 20), row->label,
+                g_phone ? 15 : 14, T->text);
+        text_in(rect(r.x + 20, r.y + 34, (int)r.width - 90, 18), row->note,
+                12.5f, row->selected ? T->text_dim : T->error);
+        toggle_switch(rect(r.x, r.y, (int)r.width - 20, (int)r.height),
+                      row->selected);
+        break;
       case ROW_CLEAR: {
-        text(r.x + 20, r.y + 24, row->label, 14, T->text);
-        text(r.x + 20, r.y + 42, row->note, 12.5f, T->text_dim);
+        text_in(rect(r.x + 20, r.y + 10, (int)r.width - 130, 20), row->label,
+                14, T->text);
+        text_in(rect(r.x + 20, r.y + 30, (int)r.width - 130, 18), row->note,
+                12.5f, T->text_dim);
         if (g_cleared) {
           text_in(rect(r.x + (int)r.width - 110, r.y, 100, (int)r.height),
                   "Cleared", 13, T->text_dim);
@@ -343,6 +429,10 @@ static void save_custom(int group) {
 
 static void click_settings_row(int i) {
   const row_t* row = &g_rows[i];
+  if (row->kind == ROW_TOGGLE) {
+    umbra_browser_browser_set_tor(!umbra_browser_browser_tor_enabled());
+    return;
+  }
   if (row->kind == ROW_CLEAR) {
     umbra_browser_browser_clear_history();
     g_cleared = true;
@@ -403,13 +493,15 @@ static void load_history(void) {
 }
 
 static rect_t history_column(rect_t area) {
-  int w = (int)area.width - 48 < 760 ? (int)area.width - 48 : 760;
+  int w = column_width(area, 760);
   return rect(area.x + ((int)area.width - w) / 2, area.y, w, (int)area.height);
 }
 
 static rect_t history_clear(rect_t area) {
   rect_t col = history_column(area);
-  return rect(col.x + (int)col.width - 200, area.y + 30 - g_scroll, 200, 32);
+  int w = g_phone ? 120 : 200, h = g_phone ? 40 : 32;
+  return rect(col.x + (int)col.width - w, area.y + 46 - h / 2 - g_scroll, w,
+              h);
 }
 
 static rect_t history_row(rect_t area, size_t i) {
@@ -438,7 +530,7 @@ static void draw_history(rect_t area) {
   rect_t col = history_column(area);
   text(col.x, area.y + 52 - g_scroll, "History", 22, T->text);
   if (g_history.len) {
-    button(history_clear(area), "Clear browsing history",
+    button(history_clear(area), g_phone ? "Clear all" : "Clear browsing history",
            g_hover == HIT_CLEAR);
   }
   if (!g_history.len) {
@@ -477,6 +569,128 @@ static void draw_history(rect_t area) {
   g_content_h = 84 + (int)g_history.len * 52 + 24;
 }
 
+/* --- tabs (phones) -------------------------------------------------------- */
+
+#define TAB_ROW_H 64
+
+int g_swipe_row = -1;
+int g_swipe_dx;
+
+static rect_t tabs_new(rect_t area) {
+  rect_t col = history_column(area);
+  return rect(col.x + (int)col.width - 120, area.y + 26 - g_scroll, 120, 40);
+}
+
+static rect_t tab_row(rect_t area, size_t i) {
+  rect_t col = history_column(area);
+  return rect(col.x, area.y + 84 + (int)i * TAB_ROW_H - g_scroll,
+              (int)col.width, TAB_ROW_H);
+}
+
+static rect_t tab_row_close(rect_t row) {
+  return rect(row.x + (int)row.width - 56, row.y + (TAB_ROW_H - 48) / 2, 48,
+              48);
+}
+
+static void draw_tabs(rect_t area) {
+  tab_list_t tabs;
+  umbra_browser_browser_tabs(&tabs);
+  size_t count = tabs.len < TAB_ROWS_MAX ? tabs.len : TAB_ROWS_MAX;
+  rect_t col = history_column(area);
+  char heading[32];
+  snprintf(heading, sizeof heading, count == 1 ? "1 tab" : "%zu tabs", count);
+  text(col.x, area.y + 54 - g_scroll, heading, 22, T->text);
+  button(tabs_new(area), "New tab", g_hover == HIT_TABS_NEW);
+  fill_round(rect(col.x, area.y + 84 - g_scroll, (int)col.width,
+                  (int)count * TAB_ROW_H),
+             8, T->card);
+  char title[512], url[2048];
+  clip(rect(col.x, area.y, (int)col.width, (int)area.height));
+  for (size_t i = 0; i < count; ++i) {
+    const tab_info_t* t = &tabs.ptr[i];
+    rect_t r = tab_row(area, i);
+    bool active = t->id == g_active;
+    if ((int)i == g_swipe_row) {
+      /* Slides with the finger, over a gap. */
+      fill(r, T->page_bg);
+      r.x += g_swipe_dx;
+      fill(r, T->card);
+    }
+    if (g_hover == HIT_TAB_ROW + (int)i || active) {
+      fill(r, T->hover);
+    }
+    if (active) {
+      fill(rect(r.x, r.y + 12, 3, TAB_ROW_H - 24), T->accent);
+    }
+    copy_str(title, sizeof title, &t->title);
+    copy_str(url, sizeof url, &t->url);
+    if (!url[0] || strncmp(url, "about:", 6) == 0) {
+      snprintf(url, sizeof url, "New tab");
+    }
+    icon_centered(t->loading ? ICON(RELOAD) : ICON(PAGE),
+                  rect(r.x + 12, r.y, 24, TAB_ROW_H), 18,
+                  t->loading ? T->accent : T->icon);
+    int text_w = (int)r.width - 48 - 64;
+    text_in(rect(r.x + 48, r.y + 10, text_w, 24), title[0] ? title : url, 15,
+            T->text);
+    text_in(rect(r.x + 48, r.y + 34, text_w, 20), url, 12.5f, T->text_dim);
+    rect_t x = tab_row_close(r);
+    if (g_hover == HIT_TAB_ROW_CLOSE + (int)i) {
+      circle(x.x + 24, x.y + 24, 18, T->separator);
+    }
+    icon_centered(ICON(CLOSE), x, 18, T->icon);
+    if (i > 0) {
+      fill(rect(r.x + 16, r.y, (int)r.width - 32, 1), T->page_bg);
+    }
+  }
+  unclip();
+  g_content_h = 84 + (int)count * TAB_ROW_H + 24;
+  umbra_browser_browser_list_tab_info_free(&tabs);
+}
+
+int tab_row_of(int code) {
+  if (code >= HIT_TAB_ROW && code < HIT_TAB_ROW + TAB_ROWS_MAX) {
+    return code - HIT_TAB_ROW;
+  }
+  if (code >= HIT_TAB_ROW_CLOSE && code < HIT_TAB_ROW_CLOSE + TAB_ROWS_MAX) {
+    return code - HIT_TAB_ROW_CLOSE;
+  }
+  return -1;
+}
+
+static int tabs_hit(int x, int y) {
+  if (inside(tabs_new(g_area), x, y)) {
+    return HIT_TABS_NEW;
+  }
+  tab_list_t tabs;
+  umbra_browser_browser_tabs(&tabs);
+  int code = 0;
+  for (size_t i = 0; i < tabs.len && i < TAB_ROWS_MAX; ++i) {
+    rect_t r = tab_row(g_area, i);
+    if (inside(r, x, y)) {
+      code = inside(tab_row_close(r), x, y) ? HIT_TAB_ROW_CLOSE + (int)i
+                                             : HIT_TAB_ROW + (int)i;
+    }
+  }
+  umbra_browser_browser_list_tab_info_free(&tabs);
+  return code;
+}
+
+static uint32_t tab_at(int index) {
+  tab_list_t tabs;
+  umbra_browser_browser_tabs(&tabs);
+  uint32_t id = (size_t)index < tabs.len ? tabs.ptr[index].id : 0;
+  umbra_browser_browser_list_tab_info_free(&tabs);
+  return id;
+}
+
+void close_tab_row(int index) {
+  uint32_t id = tab_at(index);
+  if (id) {
+    close_tab(id);
+  }
+}
+
 /* --- panels: shared ------------------------------------------------------- */
 
 void panel_open(panel_t panel) {
@@ -498,6 +712,8 @@ void panel_draw(rect_t area) {
   clip(area);
   if (g_panel == PANEL_SETTINGS) {
     draw_settings(area);
+  } else if (g_panel == PANEL_TABS) {
+    draw_tabs(area);
   } else {
     draw_history(area);
   }
@@ -516,10 +732,13 @@ int panels_hit(int x, int y) {
     rect_t m = menu_box();
     if (inside(m, x, y)) {
       for (int i = 0; i < MENU_COUNT; ++i) {
-        if (inside(rect(m.x, m.y + 8 + i * MENU_ITEM_H, (int)m.width,
-                        MENU_ITEM_H),
-                   x, y)) {
+        if (inside(menu_item(m, i), x, y)) {
           return HIT_MENU_ITEM + i;
+        }
+      }
+      for (int i = 0; i < 2 && g_phone; ++i) {
+        if (inside(menu_icon(m, i), x, y)) {
+          return HIT_MENU_ICON + i;
         }
       }
       return HIT_MENU_BG;
@@ -539,6 +758,11 @@ int panels_hit(int x, int y) {
       } else if (row->kind != ROW_NOTE && inside(row->r, x, y)) {
         return HIT_ROW + i;
       }
+    }
+  } else if (g_panel == PANEL_TABS) {
+    int code = tabs_hit(x, y);
+    if (code) {
+      return code;
     }
   } else if (g_panel == PANEL_HISTORY && g_history_loaded) {
     if (g_history.len && inside(history_clear(g_area), x, y)) {
@@ -566,11 +790,44 @@ void panels_click(int code) {
       case 2:
         panel_open(PANEL_SETTINGS);
         break;
+      case MENU_TOR:
+        umbra_browser_browser_set_tor(!umbra_browser_browser_tor_enabled());
+        break;
     }
     return;
   }
   if (code == HIT_MENU_BG) {
     g_menu_open = true; /* clicks on the menu's padding keep it open */
+    return;
+  }
+  if (code == HIT_MENU_ICON) {
+    g_menu_open = false;
+    if (g_panel == PANEL_NONE) {
+      go_forward();
+    }
+    return;
+  }
+  if (code == HIT_MENU_ICON + 1) {
+    g_menu_open = false;
+    reload_or_stop();
+    return;
+  }
+  if (code == HIT_TABS_NEW) {
+    new_tab();
+    return;
+  }
+  if (code >= HIT_TAB_ROW && code < HIT_TAB_ROW + TAB_ROWS_MAX) {
+    uint32_t id = tab_at(code - HIT_TAB_ROW);
+    if (id) {
+      switch_tab(id);
+    }
+    return;
+  }
+  if (code >= HIT_TAB_ROW_CLOSE && code < HIT_TAB_ROW_CLOSE + TAB_ROWS_MAX) {
+    uint32_t id = tab_at(code - HIT_TAB_ROW_CLOSE);
+    if (id) {
+      close_tab(id);
+    }
     return;
   }
   /* A click anywhere in a panel leaves a custom field it isn't on. */

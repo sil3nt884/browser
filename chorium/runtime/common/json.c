@@ -7,7 +7,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "host.h"
+#include "runtime.h"
+
+/* Portable C shared with MSVC builds, not Chromium code: Chromium's C++
+ * buffer-safety warnings don't apply. */
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+#endif
 
 static const char* skip_ws(const char* p) {
   while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {

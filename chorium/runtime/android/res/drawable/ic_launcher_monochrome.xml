@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright 2026 The Umbra Authors. Use of this source code is governed by a
+     BSD-style license that can be found in the LICENSE file. -->
+<!-- Chorium's icon for themed icons (Android 13+): the mark in one color,
+     which the system tints. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M73.92,37.29 A26,26 0 1,0 73.92,70.71"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="7"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M63.64,42.51 A15,15 0 1,0 63.64,65.49"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M54,48.5 a5.5,5.5 0 1,0 0.01,0 z"
+        android:fillColor="#FFFFFFFF" />
+</vector>

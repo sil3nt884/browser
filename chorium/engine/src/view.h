@@ -12,11 +12,14 @@
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ptr_exclusion.h"
 #include "base/memory/weak_ptr.h"
+#include "base/timer/timer.h"
 #include "base/values.h"
+#include "build/build_config.h"
 #include "content/public/browser/javascript_dialog_manager.h"
 #include "content/public/browser/web_contents_delegate.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "services/viz/privileged/mojom/compositing/frame_sink_video_capture.mojom.h"
+#include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/size.h"
 #include "umbra/chorium/interfaces/native/chorium.h"
 #include "url/gurl.h"
@@ -47,8 +50,9 @@ struct chorium_view {
 
 namespace chorium {
 
-// One page: a WebContents in a windowless WindowHost, with its frames
-// captured and handed to the C callbacks. Engine thread only.
+// One page: a WebContents in a windowless WindowHost (desktop) or a native
+// view (Android), with its frames captured and handed to the C callbacks
+// when the caller wants them. Engine thread only.
 class View : public content::WebContentsDelegate,
              public content::WebContentsObserver,
              public content::JavaScriptDialogManager,
@@ -60,6 +64,8 @@ class View : public content::WebContentsDelegate,
   static void Close(chorium_view* handle);
   // Destroys every view (engine shutdown).
   static void CloseAll();
+  // Applies changed preferences (the color scheme) to every page.
+  static void PreferencesChanged();
 
   View(const View&) = delete;
   View& operator=(const View&) = delete;
@@ -81,6 +87,9 @@ class View : public content::WebContentsDelegate,
   void SetFocus(bool focused);
   void Eval(int id, const std::u16string& js);
   void DialogReply(int id, bool accept, const std::u16string& text);
+  // Android: the page was pulled past its edge (see "overscroll" in
+  // chorium.h). |dx| and |dy| are CSS pixels.
+  void Overscroll(const char* kind, const char* phase, float dx, float dy);
 
  private:
   View(chorium_view* handle, int width, int height);
@@ -88,6 +97,7 @@ class View : public content::WebContentsDelegate,
   void Emit(base::DictValue event);
   content::RenderWidgetHost* Widget();
   void StartCapture();
+  void EndWheel();
   int ButtonModifiers() const;
 
   // content::WebContentsDelegate:
@@ -105,6 +115,11 @@ class View : public content::WebContentsDelegate,
       base::OnceCallback<void(content::NavigationHandle&)>
           navigation_handle_callback) override;
   void CloseContents(content::WebContents* source) override;
+  bool HandleContextMenu(content::RenderFrameHost& render_frame_host,
+                         const content::ContextMenuParams& params) override;
+#if BUILDFLAG(IS_ANDROID)
+  void SetOverlayMode(bool use_overlay_mode) override;
+#endif
   content::JavaScriptDialogManager* GetJavaScriptDialogManager(
       content::WebContents* source) override;
   bool CanEnterFullscreenModeForTab(
@@ -162,6 +177,12 @@ class View : public content::WebContentsDelegate,
   const raw_ptr<chorium_view> handle_;
   gfx::Size size_;  // CSS pixels
   bool fullscreen_ = false;
+  // A run of wheel events is one scroll gesture, ended a moment after the
+  // last event (see Wheel).
+  bool wheel_active_ = false;
+  gfx::Point wheel_point_;
+  int wheel_modifiers_ = 0;
+  base::OneShotTimer wheel_end_;
   int buttons_down_ = 0;  // blink::WebInputEvent button modifier bits
   int next_dialog_id_ = 1;
   std::map<int, DialogClosedCallback> dialogs_;
@@ -170,7 +191,9 @@ class View : public content::WebContentsDelegate,
   GURL committed_url_;
   int committed_error_ = 0;  // net::Error, 0 = OK
 
-  std::unique_ptr<WindowHost> host_;
+#if !BUILDFLAG(IS_ANDROID)
+  std::unique_ptr<WindowHost> host_;  // the page's windowless aura root
+#endif
   std::unique_ptr<content::WebContents> web_contents_;
   std::unique_ptr<viz::ClientFrameSinkVideoCapturer> capturer_;
   base::ScopedClosureRunner keep_rendering_;
