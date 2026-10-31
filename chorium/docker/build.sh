@@ -95,8 +95,15 @@ else
   rm "$OUT/args.gn.new"
 fi
 echo "BUILD START $(date -u +%FT%TZ)"
-# Lowest CPU and disk priority inside the container, on top of its caps.
-nice -n 19 ionice -c3 autoninja -C "$OUT" -j "$JOBS" "${NINJA_ARGS[@]}"
+# Share CPU with desktop work, but do not starve builds behind all other I/O.
+# BUILD_NICE=19 and BUILD_IO_CLASS=3 restore the old idle-only behavior.
+BUILD_NICE=${BUILD_NICE:-5}
+BUILD_IO_CLASS=${BUILD_IO_CLASS:-2}
+BUILD_IO_PRIORITY=${BUILD_IO_PRIORITY:-7}
+IO_ARGS=(-c "$BUILD_IO_CLASS")
+[[ $BUILD_IO_CLASS != 3 ]] && IO_ARGS+=(-n "$BUILD_IO_PRIORITY")
+nice -n "$BUILD_NICE" ionice "${IO_ARGS[@]}" \
+  autoninja -C "$OUT" -j "$JOBS" "${NINJA_ARGS[@]}"
 echo "BUILD DONE $(date -u +%FT%TZ)"
 if [[ -f $OUT/chorium.dll ]]; then
   # umbra_tor.dll comes from prebuilt/; cross builds ship snapshot_blob.bin.

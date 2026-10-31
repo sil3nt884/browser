@@ -364,6 +364,7 @@ HOSTFN(surface_scale_fn) {
 }
 
 HOSTFN(surface_clear_fn) {
+  remote_begin_frame();
   surface_clear(args[0].of.u32);
   return NULL;
 }
@@ -428,7 +429,9 @@ HOSTFN(surface_pop_clip_fn) {
 
 HOSTFN(surface_present_fn) {
   surface_present();
+#if !defined(__ANDROID__)
   remote_present();
+#endif
   return NULL;
 }
 

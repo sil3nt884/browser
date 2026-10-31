@@ -111,6 +111,48 @@ static void address_bar_clipboard(void) {
   stop();
 }
 
+static void address_bar_edits_characters(void) {
+  start(false, false);
+  press_key('L', MOD_CTRL);
+  type_text("https://example.com/inZZdex");
+  press_key(0x23, 0); /* End */
+  for (int i = 0; i < 3; ++i) press_key(0x25, 0);
+  press_key(0x25, MOD_SHIFT);
+  press_key(0x25, MOD_SHIFT);
+  press_key('C', MOD_CTRL);
+  CHECK(strcmp(clipboard(), "ZZ") == 0);
+  type_text("de");
+  press_key('A', MOD_CTRL);
+  press_key('C', MOD_CTRL);
+  CHECK(strcmp(clipboard(), "https://example.com/indedex") == 0);
+  /* Home/End and Delete operate at the caret, not at the end. */
+  press_key(0x24, 0);
+  press_key(0x2E, MOD_CTRL);
+  type_text("http://");
+  press_key('A', MOD_CTRL);
+  press_key('C', MOD_CTRL);
+  CHECK(strcmp(clipboard(), "http://example.com/indedex") == 0);
+  /* UTF-8 movement and deletion must preserve complete characters. */
+  type_text("a😀éz");
+  press_key(0x25, 0);
+  press_key(0x25, 0);
+  press_key(0x08, 0);
+  type_text("中");
+  press_key('A', MOD_CTRL);
+  press_key('C', MOD_CTRL);
+  CHECK(strcmp(clipboard(), "a中éz") == 0);
+  press_key(0x24, 0);
+  press_key(0x27, MOD_SHIFT);
+  press_key('X', MOD_CTRL);
+  CHECK(strcmp(clipboard(), "a") == 0);
+  set_clipboard("start\n");
+  press_key('V', MOD_CTRL);
+  press_key('A', MOD_CTRL);
+  press_key('C', MOD_CTRL);
+  CHECK(strcmp(clipboard(), "start 中éz") == 0);
+  stop();
+}
+
 /* chorium.h's CHORIUM_EDIT_FLAG bits. */
 #define EDIT_CUT 1
 #define EDIT_COPY 2
@@ -516,6 +558,7 @@ static const scenario_t kScenarios[] = {
     {"starts_on_home_page", starts_on_home_page},
     {"address_bar_navigates", address_bar_navigates},
     {"address_bar_clipboard", address_bar_clipboard},
+    {"address_bar_edits_characters", address_bar_edits_characters},
     {"context_menu_text_field", context_menu_text_field},
     {"context_menu_link", context_menu_link},
     {"context_menu_image", context_menu_image},

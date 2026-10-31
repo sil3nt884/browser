@@ -8,6 +8,7 @@ import ctypes
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,9 @@ DEVTOOLS_PORT = 9335
 class Target:
     phone = False
     name = "?"
+
+    def download_reference_matches(self, reference, name):
+        return reference == self.download_path(name)
 
     def start(self, fresh=True):
         raise NotImplementedError
@@ -377,6 +381,10 @@ class AndroidTarget(Target):
         if self.remote:
             self.remote.close()
             self.remote = None
+        # Let Android deliver the normal background lifecycle before a kill,
+        # as it does when reclaiming a background app's process.
+        self.shell("am start -W -a android.intent.action.MAIN -c android.intent.category.HOME")
+        time.sleep(1)
         self.shell(f"am force-stop {PACKAGE}")
 
     def cleanup(self):
@@ -387,7 +395,7 @@ class AndroidTarget(Target):
 
     def read_download(self, name):
         path = self.download_path(name)
-        if "No such file" in self.shell(f"ls {path} 2>&1", check=False):
+        if self.shell(f"test -f {shlex.quote(path)} && echo exists", check=False).strip() != "exists":
             return None
         local = os.path.join(tempfile.gettempdir(), "chorium-e2e-" + name)
         self.adb("pull", path, local, check=False)
@@ -403,7 +411,15 @@ class AndroidTarget(Target):
                 pass
 
     def delete_download(self, name):
-        self.shell(f"rm -f {self.download_path(name)}", check=False)
+        self.shell(f"rm -f {shlex.quote(self.download_path(name))}", check=False)
+
+    def download_reference_matches(self, reference, name):
+        if not reference.startswith("content://media/"):
+            return False
+        result = self.shell(
+            f"content query --uri {shlex.quote(reference)} --projection _display_name",
+            check=False)
+        return "_display_name=" + name in result
 
     def top_activity(self):
         out = self.shell("dumpsys activity activities", check=False)
@@ -417,6 +433,9 @@ class AndroidTarget(Target):
     def display_hz(self):
         out = self.shell("dumpsys display", check=False)
         rates = [float(r) for r in re.findall(r"refreshRate=([\d.]+)", out)]
+        if not rates:
+            # Android 16 writes supported mode rates as fps=, not refreshRate=.
+            rates = [float(r) for r in re.findall(r"\bfps=([\d.]+)", out)]
         return max(rates) if rates else 60.0
 
     def renderer_users(self):

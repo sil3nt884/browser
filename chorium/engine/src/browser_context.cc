@@ -10,6 +10,12 @@
 #include "umbra/chorium/engine/src/downloads.h"
 #include "umbra/chorium/engine/src/engine.h"
 #include "base/logging.h"
+#if BUILDFLAG(IS_ANDROID)
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "content/public/browser/storage_partition.h"
+#include "services/network/public/mojom/cookie_manager.mojom.h"
+#endif
 #if BUILDFLAG(IS_WIN)
 #include "components/os_crypt/async/browser/dpapi_key_provider.h"
 #include "components/os_crypt/async/browser/os_crypt_async.h"
@@ -24,6 +30,11 @@
 namespace chorium {
 
 BrowserContext::BrowserContext() {
+#if BUILDFLAG(IS_ANDROID)
+  app_state_listener_ = base::android::ApplicationStatusListener::New(
+      base::BindRepeating(&BrowserContext::OnApplicationStateChanged,
+                         base::Unretained(this)));
+#endif
   if (!State().profile_dir.empty()) {
     path_ = State().profile_dir;
     // A marker outside the profile also covers force-stop and power loss.
@@ -62,9 +73,25 @@ BrowserContext::BrowserContext() {
 }
 
 BrowserContext::~BrowserContext() {
+#if BUILDFLAG(IS_ANDROID)
+  app_state_listener_.reset();
+#endif
   NotifyWillBeDestroyed();
   ShutdownStoragePartitions();
 }
+
+#if BUILDFLAG(IS_ANDROID)
+void BrowserContext::OnApplicationStateChanged(
+    base::android::ApplicationState state) {
+  if (state == base::android::APPLICATION_STATE_HAS_PAUSED_ACTIVITIES ||
+      state == base::android::APPLICATION_STATE_HAS_STOPPED_ACTIVITIES) {
+    auto* partition = GetDefaultStoragePartition();
+    partition->Flush();
+    partition->GetCookieManagerForBrowserProcess()->FlushCookieStore(
+        base::DoNothing());
+  }
+}
+#endif
 
 std::unique_ptr<content::ZoomLevelDelegate>
 BrowserContext::CreateZoomLevelDelegate(const base::FilePath&) {

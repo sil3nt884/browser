@@ -5,7 +5,7 @@
 Chorium's previously failed Docker Windows build now succeeds, including
 `Chorium.exe` linked to Chromium's sandbox. Portable output:
 `C:\me-tor\chorium-out\Chorium-Windows`. The real Windows e2e suite passes
-22/22 (with `--network`); the app suite passes 188 checks in 20 desktop/phone
+22/22 (with `--network`); the app suite passes 200 checks in 21 desktop/phone
 scenarios. Hook tests: 7 pass. Page frame rate: 144 fps on the 144 Hz display.
 Renderer audit: integrity RID 0, in a job, win32k system calls disabled.
 
@@ -39,13 +39,45 @@ that those cache directories are absent. New portable output:
 `C:\me-tor\chorium-out\Chorium-Windows-RAM-cache`; the older tested folder
 is left intact because the user is running MotionMark in it.
 
-Android native and Java checks now pass. An unused `dy` JNI argument was
-removed to pass Error Prone. The full APK build is running in
-`chorium-android`; no phone test has run yet. Test profiles now live under
-`files/test-profiles/<name>` and require the remote-control flag, so intent
-extras cannot clear normal app data.
-Android compilation/testing is still in progress; update this status when
-finished. Do not run Windows and Android native builds together.
+Android APK builds and installs on the connected Redmi. The latest full
+phone run passed 19 tests, skipped two desktop-only tests, and had one ADB
+daemon error before the frame-rate test. The isolated frame-rate rerun
+still reports 60 fps against a 120 Hz display; this remains unresolved.
+Downloads now use MediaStore shared Downloads, infer generic MIME types
+from extensions (preserving extensions when numbering duplicates), and
+open content URIs. Android background lifecycle flushes cookies/DOM storage.
+Remote elements become visible only after Android draws their touch regions.
+Test profiles live under `files/test-profiles/<name>` and require the
+remote-control flag, so intent extras cannot clear normal app data.
+APK: `C:\me-tor\Chorium\Chorium-157.0.8103.15-Android-arm64-20261031.apk`.
+Logs: `C:\me-tor\chorium-out\android-e2e.log`, `android-fps.log`.
+
+Use `chorium-android-fast` for incremental builds: eight jobs, 18 CPUs,
+10 GB RAM, generator CPU count four. Full builds should use six jobs.
+`build.sh` now defaults to nice 5 / best-effort I/O priority 7. Retain the
+`chorium-work` volume and current GN args: measured Java APK updates take
+30-35 seconds; the native download fix plus Chromium relink took 63 seconds.
+The follow-up Windows native build also succeeds. Do not run Windows and
+Android native builds together.
+
+Address-bar editing continuation: the shared field now stores UTF-8 caret
+and anchor offsets, supports click/tap placement, drag selection, Shift
+arrows/Home/End, Ctrl word movement/deletion, and partial cut/copy/paste.
+Long text scrolls to keep the caret visible. Windows captured selection
+drags continue outside the window; Android commits IME composition before
+pointer repositioning and supports forward deletion. Shared tests: 200
+checks / 21 desktop-and-phone scenarios pass. The real Windows runtime
+passes three address tests (pointer/drag edits, long Unicode URLs, typing),
+kept hidden. Log: `C:\me-tor\chorium-out\windows-address-editing-v4.log`.
+New Windows folder: `C:\me-tor\chorium-out\Chorium-Windows-Address-editing`.
+Its matching ZIP is in `C:\me-tor\Chorium` with `-Address-editing.zip`.
+The updated Android APK builds and installs; the three real phone address
+tests also pass (`C:\me-tor\chorium-out\android-address-editing.log`).
+HyperOS initially rejected updates with INSTALL_FAILED_USER_RESTRICTED.
+When ADB then lost the phone, two servers were running on 5037 and 5038.
+Stopping both and restarting only 5038 restored discovery; the user's
+requested streamed retry then succeeded. Never uninstall or clear normal
+app data to work around installation restrictions.
 
 Chromium fork (Brave-style: this repo is linked in as `src/umbra` inside a
 Chromium checkout) that routes all traffic through an in-process Tor (Arti)

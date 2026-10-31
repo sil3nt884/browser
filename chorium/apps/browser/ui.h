@@ -102,7 +102,10 @@ void set_setting(const char* key, const char* value);
 
 typedef struct {
   char buf[2048];
-  bool selected; /* everything selected: typing replaces it */
+  size_t caret, anchor; /* UTF-8 byte boundaries; unequal means selected */
+  int scroll;
+  rect_t viewport;
+  float font_size;
 } field_t;
 
 void field_set(field_t* f, const char* value, bool select_all);
@@ -113,7 +116,8 @@ void field_text(field_t* f, const app_string_t* s);
 void field_paste(field_t* f);
 /* Draws the contents at |x| in |r| (vertically centred), with selection or
  * caret when focused, else |placeholder| if empty. */
-void field_draw(const field_t* f, rect_t r, int x, float size, bool focused,
+void field_place(field_t* f, int x, bool extend);
+void field_draw(field_t* f, rect_t r, int x, float size, bool focused,
                 const char* placeholder);
 
 /* --- gestures.c ----------------------------------------------------------- */

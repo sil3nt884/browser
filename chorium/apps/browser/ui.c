@@ -174,53 +174,78 @@ void set_setting(const char* key, const char* value) {
 /* --- text fields ---------------------------------------------------------- */
 
 void field_set(field_t* f, const char* value, bool select_all) {
-  snprintf(f->buf, sizeof f->buf, "%s", value);
-  f->selected = select_all && f->buf[0];
+  size_t n = strlen(value);
+  if (n >= sizeof f->buf) {
+    n = sizeof f->buf - 1;
+    while (n && ((unsigned char)value[n] & 0xC0) == 0x80) --n;
+  }
+  memmove(f->buf, value, n);
+  f->buf[n] = '\0';
+  f->caret = strlen(f->buf);
+  f->anchor = select_all ? 0 : f->caret;
+  f->scroll = 0;
 }
 
-static void backspace(char* s) {
-  size_t n = strlen(s);
-  while (n > 0) {
-    --n;
-    if (((unsigned char)s[n] & 0xC0) != 0x80) {
-      break;
-    }
-  }
-  s[n] = '\0';
+static size_t previous_char(const char* s, size_t at) {
+  if (!at) return 0;
+  do { --at; } while (at && ((unsigned char)s[at] & 0xC0) == 0x80);
+  return at;
 }
 
-/* Ctrl+Backspace: trailing separators, then the word before them. */
-static void backspace_word(char* s) {
-  static const char* separators = " /.:?&=#-_";
-  size_t n = strlen(s);
-  while (n > 0 && strchr(separators, s[n - 1])) {
-    --n;
-  }
-  while (n > 0 && !strchr(separators, s[n - 1])) {
-    --n;
-  }
-  s[n] = '\0';
+static size_t next_char(const char* s, size_t at) {
+  if (!s[at]) return at;
+  do { ++at; } while (((unsigned char)s[at] & 0xC0) == 0x80);
+  return at;
+}
+
+static bool separator(char c) {
+  return c && strchr(" /.:?&=#-_", c);
+}
+
+static size_t previous_word(const char* s, size_t at) {
+  while (at && separator(s[previous_char(s, at)])) at = previous_char(s, at);
+  while (at && !separator(s[previous_char(s, at)])) at = previous_char(s, at);
+  return at;
+}
+
+static size_t next_word(const char* s, size_t at) {
+  while (s[at] && !separator(s[at])) at = next_char(s, at);
+  while (s[at] && separator(s[at])) at = next_char(s, at);
+  return at;
+}
+
+static size_t selection_start(const field_t* f) {
+  return f->caret < f->anchor ? f->caret : f->anchor;
+}
+
+static size_t selection_end(const field_t* f) {
+  return f->caret > f->anchor ? f->caret : f->anchor;
+}
+
+static void erase_range(field_t* f, size_t start, size_t end) {
+  memmove(f->buf + start, f->buf + end, strlen(f->buf + end) + 1);
+  f->anchor = f->caret = start;
 }
 
 bool field_key(field_t* f, const keypress_t* k, bool* enter) {
   bool ctrl = k->modifiers & UMBRA_CHORIUM_TYPES_MODIFIERS_CTRL;
+  bool shift = k->modifiers & UMBRA_CHORIUM_TYPES_MODIFIERS_SHIFT;
   *enter = false;
   if (!k->down) {
     return true;
   }
   if (ctrl && k->code == 'A') {
-    f->selected = f->buf[0] != '\0';
+    f->anchor = 0;
+    f->caret = strlen(f->buf);
     return true;
   }
-  /* The caret is always at the end, so copy and cut take the whole text
-   * once it's selected. */
   if (ctrl && (k->code == 'C' || k->code == 'X')) {
-    if (f->selected) {
-      app_string_t s = str(f->buf);
+    size_t start = selection_start(f), end = selection_end(f);
+    if (start != end) {
+      app_string_t s = {(uint8_t*)f->buf + start, end - start};
       umbra_chorium_surface_copy_text(&s);
       if (k->code == 'X') {
-        f->buf[0] = '\0';
-        f->selected = false;
+        erase_range(f, start, end);
       }
     }
     return true;
@@ -231,32 +256,44 @@ bool field_key(field_t* f, const keypress_t* k, bool* enter) {
   }
   switch (k->code) {
     case VK_RETURN:
-      f->selected = false;
+      f->anchor = f->caret;
       *enter = true;
       return true;
     case VK_BACK:
-      if (f->selected) {
-        f->buf[0] = '\0';
-      } else if (ctrl) {
-        backspace_word(f->buf);
+      if (f->caret != f->anchor) {
+        erase_range(f, selection_start(f), selection_end(f));
       } else {
-        backspace(f->buf);
+        erase_range(f, ctrl ? previous_word(f->buf, f->caret)
+                            : previous_char(f->buf, f->caret), f->caret);
       }
-      f->selected = false;
       return true;
     case VK_DELETE:
-      /* The caret is always at the end: Delete only clears a selection. */
-      if (f->selected) {
-        f->buf[0] = '\0';
-        f->selected = false;
+      if (f->caret != f->anchor) {
+        erase_range(f, selection_start(f), selection_end(f));
+      } else {
+        erase_range(f, f->caret, ctrl ? next_word(f->buf, f->caret)
+                                    : next_char(f->buf, f->caret));
       }
       return true;
     case VK_LEFT:
     case VK_RIGHT:
     case VK_HOME:
-    case VK_END:
-      f->selected = false;
+    case VK_END: {
+      size_t at = f->caret;
+      if (!shift && f->caret != f->anchor &&
+          (k->code == VK_LEFT || k->code == VK_RIGHT)) {
+        at = k->code == VK_LEFT ? selection_start(f) : selection_end(f);
+      } else if (k->code == VK_LEFT) {
+        at = ctrl ? previous_word(f->buf, at) : previous_char(f->buf, at);
+      } else if (k->code == VK_RIGHT) {
+        at = ctrl ? next_word(f->buf, at) : next_char(f->buf, at);
+      } else {
+        at = k->code == VK_HOME ? 0 : strlen(f->buf);
+      }
+      f->caret = at;
+      if (!shift) f->anchor = at;
       return true;
+    }
   }
   return false;
 }
@@ -264,57 +301,96 @@ bool field_key(field_t* f, const keypress_t* k, bool* enter) {
 void field_paste(field_t* f) {
   app_string_t clip;
   umbra_chorium_surface_read_clipboard(&clip);
-  if (f->selected) {
-    f->buf[0] = '\0';
-    f->selected = false;
-  }
-  /* One line: line breaks become spaces, as in Chrome's address bar. */
-  size_t n = strlen(f->buf);
-  for (size_t i = 0; i < clip.len && n + 1 < sizeof f->buf; ++i) {
-    char c = (char)clip.ptr[i];
-    if (c == '\r') {
-      continue;
-    }
-    f->buf[n++] = c == '\n' || c == '\t' ? ' ' : c;
-  }
-  f->buf[n] = '\0';
+  field_text(f, &clip);
   app_string_free(&clip);
 }
 
 void field_text(field_t* f, const app_string_t* s) {
-  char add[256];
-  copy_str(add, sizeof add, s);
-  if (f->selected) {
-    f->buf[0] = '\0';
-    f->selected = false;
+  size_t start = selection_start(f), end = selection_end(f);
+  size_t available = sizeof f->buf - 1 - (strlen(f->buf) - (end - start));
+  char add[sizeof f->buf];
+  size_t n = 0;
+  for (size_t i = 0; i < s->len;) {
+    size_t bytes = 1;
+    while (i + bytes < s->len && (s->ptr[i + bytes] & 0xC0) == 0x80) ++bytes;
+    if (n + bytes > available) break;
+    if (s->ptr[i] != '\r' && s->ptr[i]) {
+      if (s->ptr[i] == '\n' || s->ptr[i] == '\t') add[n++] = ' ';
+      else { memcpy(add + n, s->ptr + i, bytes); n += bytes; }
+    }
+    i += bytes;
   }
-  if (strlen(f->buf) + strlen(add) < sizeof f->buf) {
-    strcat(f->buf, add);
-  }
+  erase_range(f, start, end);
+  memmove(f->buf + start + n, f->buf + start, strlen(f->buf + start) + 1);
+  memcpy(f->buf + start, add, n);
+  f->anchor = f->caret = start + n;
 }
 
-void field_draw(const field_t* f, rect_t r, int x, float size, bool focused,
+static int prefix_width(const field_t* f, size_t end, float size) {
+  char prefix[sizeof f->buf];
+  memcpy(prefix, f->buf, end);
+  prefix[end] = '\0';
+  return text_width(prefix, size);
+}
+
+void field_place(field_t* f, int x, bool extend) {
+  int width = (int)f->viewport.width;
+  if (extend) {
+    if (x < f->viewport.x) f->scroll -= (f->viewport.x - x) / 2 + 1;
+    if (x > f->viewport.x + width) f->scroll += (x - f->viewport.x - width) / 2 + 1;
+    int maximum = text_width(f->buf, f->font_size) - width + 2;
+    if (f->scroll > maximum) f->scroll = maximum;
+    if (f->scroll < 0) f->scroll = 0;
+  }
+  int target = x - f->viewport.x + f->scroll;
+  size_t lo = 0, hi = strlen(f->buf);
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    while (mid > lo && ((unsigned char)f->buf[mid] & 0xC0) == 0x80) --mid;
+    size_t next = next_char(f->buf, mid);
+    int middle = (prefix_width(f, mid, f->font_size) +
+                  prefix_width(f, next, f->font_size)) / 2;
+    if (target < middle) hi = mid;
+    else lo = next;
+  }
+  f->caret = lo;
+  if (!extend) f->anchor = lo;
+}
+
+void field_draw(field_t* f, rect_t r, int x, float size, bool focused,
                 const char* placeholder) {
   rect_t box = rect(x, r.y, (int)r.width - (x - r.x), (int)r.height);
+  f->viewport = box;
+  f->font_size = size;
+  int caret = prefix_width(f, f->caret, size);
+  int width = (int)box.width;
+  bool selected = f->caret != f->anchor;
+  if (!focused) f->scroll = 0;
+  else if (!(selected && selection_start(f) == 0 &&
+             selection_end(f) == strlen(f->buf))) {
+    if (caret - f->scroll > width - 2) f->scroll = caret - width + 2;
+    if (caret - f->scroll < 0) f->scroll = caret;
+  }
+  int maximum = text_width(f->buf, size) - width + 2;
+  if (f->scroll > maximum) f->scroll = maximum;
+  if (f->scroll < 0) f->scroll = 0;
+  clip(box);
   if (!f->buf[0]) {
     text_in(box, placeholder, size, T->text_dim);
   } else {
-    if (focused && f->selected) {
-      int w = text_width(f->buf, size);
+    if (focused && selected) {
+      int left = prefix_width(f, selection_start(f), size);
+      int right = prefix_width(f, selection_end(f), size);
       int h = (int)(size * 1.4f);
-      if (w + 2 > (int)box.width) {
-        w = (int)box.width - 2; /* long text is clipped; so is its highlight */
-      }
-      fill(rect(x - 1, r.y + ((int)r.height - h) / 2, w + 2, h),
+      fill(rect(x + left - f->scroll, r.y + ((int)r.height - h) / 2, right - left, h),
            T->selection);
     }
-    text_in(box, f->buf, size, T->text);
+    text(x - f->scroll, r.y + (int)r.height / 2 + (int)(size * 0.36f),
+         f->buf, size, T->text);
   }
-  if (focused && !f->selected) {
-    int w = f->buf[0] ? text_width(f->buf, size) : 0;
+  if (focused && !selected) {
     int h = (int)(size * 1.3f);
-    if (x + w < r.x + (int)r.width) {
-      fill(rect(x + w, r.y + ((int)r.height - h) / 2, 1, h), T->text);
-    }
+    fill(rect(x + caret - f->scroll, r.y + ((int)r.height - h) / 2, 1, h), T->text);
   }
+  unclip();
 }

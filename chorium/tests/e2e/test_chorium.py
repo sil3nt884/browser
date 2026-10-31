@@ -156,7 +156,7 @@ class Downloads(ChoriumTest):
             self.r.tap_icon("folder")  # the notice's Show in folder
             opened = self.r.state()["opened"]
             self.assertTrue(opened and opened[-1]["in_folder"])
-            self.assertTrue(opened[-1]["path"].endswith(name))
+            self.assertTrue(self.t.download_reference_matches(opened[-1]["path"], name))
             # The Downloads page, from the menu.
             self.b.open_menu()
             self.r.tap_text("Downloads", exact=True)
@@ -164,7 +164,7 @@ class Downloads(ChoriumTest):
             self.r.tap_text(name)
             opened = self.r.state()["opened"]
             self.assertFalse(opened[-1]["in_folder"])
-            self.assertTrue(opened[-1]["path"].endswith(name))
+            self.assertTrue(self.t.download_reference_matches(opened[-1]["path"], name))
             self.r.back() if self.t.phone else self.r.key(VK_ESCAPE)
         finally:
             self.r.intercept_open(False)
@@ -271,6 +271,64 @@ class Sandbox(ChoriumTest):
 
 
 class Regressions(ChoriumTest):
+    def test_address_bar_edits_long_unicode_text(self):
+        self.b.set_tor(False)
+        prefix = SERVER.url("/pages/index.html") + "?q=" + "a" * 180
+        self.b.focus_address()
+        self.r.type(prefix + "😀é")
+        self.r.wait_text(prefix + "😀é", exact=True)
+        self.r.key(0x25)  # before é
+        self.r.key(0x08)  # remove the entire emoji, without touching its neighbours
+        self.r.type("中")
+        self.r.wait_text(prefix + "中é", exact=True)
+        self.r.key(VK_RETURN)
+        page = self.b.page("/pages/index.html")
+        self.assertEqual(page.eval("new URL(location.href).searchParams.get('q')"),
+                         "a" * 180 + "中é")
+
+    def test_address_bar_edits_middle_and_selection(self):
+        self.b.set_tor(False)
+        url = SERVER.url("/pages/inZZdex.html")
+        self.b.focus_address()
+        self.r.type(url)
+        original = self.r.wait_text(url, exact=True)
+        # Clicking/tapping an already focused address places a caret at that
+        # visible character. A short insertion must preserve both sides.
+        self.r.tap(*original.center)
+        self.r.type("~")
+        edited = self.r.wait_for(lambda: next(
+            (t.text for t in self.r.texts() if "~" in t.text), None), 5,
+            "the insertion in the address")
+        self.assertEqual(edited.replace("~", ""), url)
+        self.assertGreater(edited.index("~"), 0)
+        self.assertLess(edited.index("~"), len(edited) - 1)
+        self.r.key(0x08)
+        self.r.wait_text(url, exact=True)
+        original = self.r.find_text(url, exact=True)
+        y = original.center[1]
+        self.r.swipe(original.x + original.w // 3, y,
+                     original.x + original.w * 2 // 3, y)
+        self.r.type("~")
+        edited = self.r.wait_for(lambda: next(
+            (t.text for t in self.r.texts() if "~" in t.text), None), 5,
+            "replacement of the dragged selection")
+        self.assertGreater(edited.index("~"), 0)
+        self.assertLess(edited.index("~"), len(edited) - 1)
+        self.assertLess(len(edited), len(url))
+        self.r.key(ord("A"), CTRL)
+        self.r.type(url)
+        # Select just the two wrong characters and remove them. Navigation
+        # proves the edited value, rather than only the drawing, is correct.
+        self.r.key(0x23)  # End
+        for _ in "dex.html":
+            self.r.key(0x25)  # Left
+        self.r.key(0x25, 1)  # Shift+Left
+        self.r.key(0x25, 1)
+        self.r.key(0x2E)  # Delete selection
+        self.r.wait_text(SERVER.url("/pages/index.html"), exact=True)
+        self.r.key(VK_RETURN)
+        self.b.page("/pages/index.html")
+
     def test_page_text_is_visible(self):
         self.desktop_only()
         page = self.home()
@@ -473,11 +531,11 @@ class Regressions(ChoriumTest):
         page = self.home()
         self.b.open_menu()
         self.r.tap_text("Settings", exact=True)
-        self.r.tap_text("Dark", exact=True)
+        self.r.tap(*self.b.settings_row("Dark").center)
         self.r.wait_for(lambda: page.eval(
             "matchMedia('(prefers-color-scheme: dark)').matches"), 10,
             "pages to turn dark")
-        self.r.tap_text("Light", exact=True)
+        self.r.tap(*self.b.settings_row("Light").center)
         self.r.wait_for(lambda: not page.eval(
             "matchMedia('(prefers-color-scheme: dark)').matches"), 10,
             "pages to turn light")

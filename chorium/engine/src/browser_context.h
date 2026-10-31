@@ -9,6 +9,9 @@
 #include "base/files/file_path.h"
 #include "build/build_config.h"
 #include "content/public/browser/browser_context.h"
+#if BUILDFLAG(IS_ANDROID)
+#include "base/android/application_status_listener.h"
+#endif
 
 #if BUILDFLAG(IS_WIN)
 class PrefService;
@@ -64,6 +67,10 @@ class BrowserContext : public content::BrowserContext {
       override;
 
  private:
+#if BUILDFLAG(IS_ANDROID)
+  void OnApplicationStateChanged(base::android::ApplicationState state);
+  std::unique_ptr<base::android::ApplicationStatusListener> app_state_listener_;
+#endif
   base::FilePath path_;
   bool off_the_record_ = true;
 #if BUILDFLAG(IS_WIN)

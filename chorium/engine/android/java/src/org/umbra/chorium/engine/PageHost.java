@@ -4,14 +4,20 @@
 package org.umbra.chorium.engine;
 
 import android.content.Context;
+import android.database.Cursor;
 import android.graphics.Rect;
+import android.net.Uri;
+import android.provider.MediaStore;
 import android.view.ActionMode;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.webkit.MimeTypeMap;
 import android.widget.FrameLayout;
 
 import org.chromium.base.ThreadUtils;
+import org.chromium.base.ContextUtils;
+import org.chromium.components.download.DownloadCollectionBridge;
 import org.chromium.components.embedder_support.view.ContentView;
 import org.chromium.components.embedder_support.view.ContentViewRenderView;
 import org.chromium.content_public.browser.ActionModeCallback;
@@ -33,6 +39,7 @@ import org.jni_zero.NativeMethods;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Locale;
 
 /**
  * Where Chorium's pages show on Android. Each page is a ContentView (real
@@ -42,6 +49,25 @@ import java.util.Map;
  */
 @JNINamespace("chorium::android")
 public class PageHost extends FrameLayout {
+    /** Worker thread: reserve a pending file in the shared Downloads collection. */
+    @CalledByNative
+    private static String[] createDownloadTarget(String name, String mime, String url) {
+        if (mime.isEmpty() || mime.equals("application/octet-stream")) {
+            int dot = name.lastIndexOf('.');
+            String inferred = dot < 0 ? null : MimeTypeMap.getSingleton()
+                    .getMimeTypeFromExtension(name.substring(dot + 1).toLowerCase(Locale.ROOT));
+            if (inferred != null) mime = inferred;
+        }
+        String uri = DownloadCollectionBridge.createIntermediateUriForPublish(name, mime, url, "");
+        if (uri == null) return new String[] {"", ""};
+        try (Cursor cursor = ContextUtils.getApplicationContext().getContentResolver().query(
+                Uri.parse(uri), new String[] {MediaStore.MediaColumns.DISPLAY_NAME},
+                null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
+        }
+        return new String[] {uri, name};
+    }
+
     private static PageHost sInstance;
 
     private final WindowAndroid mWindow;

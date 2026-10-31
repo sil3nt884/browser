@@ -90,6 +90,7 @@ public class AppView extends View {
     private final ArrayList<RectF> mCovers = new ArrayList<>();
     private final float mDensity;
     private byte[] mOps = new byte[0];
+    private boolean mFramePending;
     private boolean mStarted;
     /** Text the keyboard is composing, already sent to the app as typed text. */
     private String mComposing = "";
@@ -208,6 +209,10 @@ public class AppView extends View {
             }
         }
         canvas.restoreToCount(base);
+        if (mStarted && mFramePending) {
+            mFramePending = false;
+            ChoriumNativesJni.get().framePresented();
+        }
     }
 
     private void cover() {
@@ -252,6 +257,7 @@ public class AppView extends View {
     private static void present(byte[] ops) {
         if (sInstance == null) return;
         sInstance.mOps = ops;
+        sInstance.mFramePending = true;
         sInstance.invalidate();
     }
 
@@ -367,6 +373,14 @@ public class AppView extends View {
             case MotionEvent.ACTION_DOWN:
                 // Not taking the down leaves the whole gesture to the page.
                 if (onPage(event.getX() / mDensity, event.getY() / mDensity)) return false;
+                // A tap commits the current IME word before moving its caret.
+                // Otherwise the next composing update backspaces at the new position.
+                if (!mComposing.isEmpty()) {
+                    mComposing = "";
+                    InputMethodManager imm = (InputMethodManager) getContext()
+                            .getSystemService(Context.INPUT_METHOD_SERVICE);
+                    imm.restartInput(this);
+                }
                 type = 0;
                 requestFocus();
                 break;
@@ -482,7 +496,13 @@ public class AppView extends View {
             @Override
             public boolean deleteSurroundingText(int beforeLength, int afterLength) {
                 for (int i = 0; i < beforeLength; i++) tapKey(0x08);
+                for (int i = 0; i < afterLength; i++) tapKey(0x2E);
                 return true;
+            }
+
+            @Override
+            public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
+                return deleteSurroundingText(beforeLength, afterLength);
             }
 
             @Override
@@ -499,7 +519,9 @@ public class AppView extends View {
         int common = 0;
         int max = Math.min(text.length(), mComposing.length());
         while (common < max && text.charAt(common) == mComposing.charAt(common)) common++;
-        for (int i = common; i < mComposing.length(); i++) tapKey(0x08);
+        if (common > 0 && Character.isHighSurrogate(mComposing.charAt(common - 1))) common--;
+        int removed = mComposing.codePointCount(common, mComposing.length());
+        for (int i = 0; i < removed; i++) tapKey(0x08);
         if (common < text.length()) ChoriumNativesJni.get().text(text.substring(common));
         mComposing = text;
     }

@@ -21,6 +21,8 @@ final class ChoriumNatives {
         void surface(int widthPx, int heightPx, float density, boolean dark);
 
         void draw();
+        /** The display list has reached Canvas and its touch regions are current. */
+        void framePresented();
 
         /** x, y in CSS pixels; type 0 down, 1 move, 2 up, 3 cancel. */
         void pointer(int type, float x, float y);

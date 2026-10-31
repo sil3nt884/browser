@@ -286,6 +286,13 @@ void remote_unclip(void) {
   }
 }
 
+void remote_begin_frame(void) {
+  if (g_enabled) {
+    frame_clear(&g_drawing);
+    g_clip_depth = 0;
+  }
+}
+
 void remote_present(void) {
   if (!g_enabled) {
     return;

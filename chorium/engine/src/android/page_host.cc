@@ -6,13 +6,28 @@
 #include <stdint.h>
 
 #include <array>
+#include <vector>
 
 #include "base/android/jni_android.h"
+#include "base/android/jni_array.h"
+#include "base/android/jni_string.h"
 #include "content/public/browser/web_contents.h"
 #include "umbra/chorium/engine/chorium_engine_jni/PageHost_jni.h"
 #include "umbra/chorium/engine/src/view.h"
 
 namespace chorium::android {
+
+std::pair<base::FilePath, base::FilePath> CreatePublicDownload(
+    const std::string& name, const std::string& mime, const std::string& url) {
+  JNIEnv* env = base::android::AttachCurrentThread();
+  auto result = Java_PageHost_createDownloadTarget(
+      env, base::android::ConvertUTF8ToJavaString(env, name),
+      base::android::ConvertUTF8ToJavaString(env, mime),
+      base::android::ConvertUTF8ToJavaString(env, url));
+  std::vector<std::string> parts;
+  base::android::AppendJavaStringArrayToStringVector(env, result, &parts);
+  return {base::FilePath(parts.at(0)), base::FilePath(parts.at(1))};
+}
 
 namespace {
 

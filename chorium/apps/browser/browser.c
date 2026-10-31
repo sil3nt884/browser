@@ -70,6 +70,8 @@ int g_hover;
 bool g_phone;
 
 static field_t g_address;
+static bool g_address_drag, g_address_drag_pending;
+static int g_address_drag_start;
 static bool g_has_title_bar;
 static int g_strip;     /* tab strip height (= title bar height if ours) */
 static int g_buttons_w; /* window buttons at the right of the strip */
@@ -801,7 +803,8 @@ static void click(int code, const pointer_t* p) {
       if (g_focus != FOCUS_ADDRESS) {
         focus_address();
       } else {
-        g_address.selected = false; /* second click: caret at the end */
+        field_place(&g_address, p->x,
+                    p->modifiers & UMBRA_CHORIUM_TYPES_MODIFIERS_SHIFT);
       }
       break;
     case HIT_MENU:
@@ -941,6 +944,18 @@ void exports_app_on_input(app_input_t* event) {
     case UMBRA_CHORIUM_TYPES_INPUT_POINTER_MOVE: {
       x = event->val.pointer_move.x;
       y = event->val.pointer_move.y;
+      if (g_address_drag) {
+        int dx = x - g_address_drag_start;
+        if (g_address_drag_pending && (dx > 3 || dx < -3)) {
+          field_place(&g_address, g_address_drag_start, false);
+          g_address_drag_pending = false;
+        }
+        if (!g_address_drag_pending) {
+          field_place(&g_address, x, true);
+          request_draw();
+        }
+        break;
+      }
       if (g_touch.down) {
         int dx = x - g_touch.start_x, dy = y - g_touch.start_y;
         int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
@@ -976,6 +991,18 @@ void exports_app_on_input(app_input_t* event) {
       y = event->val.pointer_down.y;
       int code = hit(x, y);
       bool menu_was_open = g_menu_open;
+      if (code == HIT_ADDRESS && !g_menu_open && !context_menu_is_open() &&
+          (g_focus == FOCUS_ADDRESS || !g_phone)) {
+        g_address_drag_pending = g_focus != FOCUS_ADDRESS;
+        if (g_address_drag_pending) focus_address();
+        else field_place(&g_address, x,
+                         event->val.pointer_down.modifiers &
+                             UMBRA_CHORIUM_TYPES_MODIFIERS_SHIFT);
+        g_address_drag = true;
+        g_address_drag_start = x;
+        request_draw();
+        break;
+      }
       if (g_phone) {
         g_hover = code; /* pressed look until the finger lifts */
       }
@@ -998,6 +1025,12 @@ void exports_app_on_input(app_input_t* event) {
     case UMBRA_CHORIUM_TYPES_INPUT_POINTER_UP:
       x = event->val.pointer_up.x;
       y = event->val.pointer_up.y;
+      if (g_address_drag) {
+        if (!g_address_drag_pending) field_place(&g_address, x, true);
+        g_address_drag = false;
+        request_draw();
+        break;
+      }
       to_page = hit(x, y) == HIT_PAGE;
       if (g_touch.down) {
         int dx = x - g_touch.start_x, dy = y - g_touch.start_y;
@@ -1023,6 +1056,9 @@ void exports_app_on_input(app_input_t* event) {
       }
       break;
     case UMBRA_CHORIUM_TYPES_INPUT_POINTER_LEAVE:
+      /* Windows keeps delivering a captured drag outside the window. */
+      if (g_address_drag && !g_phone) break;
+      g_address_drag = false;
       g_touch.down = false;
       g_swipe_row = -1;
       if (g_hover) {
@@ -1060,6 +1096,10 @@ void exports_app_on_input(app_input_t* event) {
       }
       break;
     case UMBRA_CHORIUM_TYPES_INPUT_FOCUS:
+      if (!event->val.focus) {
+        g_address_drag = false;
+        g_touch.down = false;
+      }
       /* On a phone the page is touched directly, which takes focus from us:
        * then our address field (and its keyboard) is done. */
       if (g_phone && !event->val.focus && g_focus != FOCUS_PAGE) {

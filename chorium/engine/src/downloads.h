@@ -51,9 +51,6 @@ class DownloadDelegate : public content::DownloadManagerDelegate,
 
  private:
   void Report(download::DownloadItem* item);
-  void OnTargetChosen(uint32_t id,
-                      download::DownloadTargetCallback callback,
-                      const base::FilePath& path);
 
   raw_ptr<content::DownloadManager> manager_;
   // When each download last reported progress, and the state it reported.

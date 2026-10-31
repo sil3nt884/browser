@@ -20,7 +20,7 @@
 #include "umbra/chorium/engine/src/view.h"
 
 #if BUILDFLAG(IS_ANDROID)
-#include "base/android/path_utils.h"
+#include "umbra/chorium/engine/src/android/page_host.h"
 #elif BUILDFLAG(IS_WIN)
 #include <windows.h>
 #include <knownfolders.h>
@@ -38,11 +38,7 @@ constexpr base::TimeDelta kProgressInterval = base::Milliseconds(250);
 
 base::FilePath DefaultDownloadDir() {
   base::FilePath dir;
-#if BUILDFLAG(IS_ANDROID)
-  // The shared Download folder: since Android 11 an app may create files
-  // there by path, and they show up in the Files app and other apps.
-  base::android::GetDownloadsDirectory(&dir);
-#elif BUILDFLAG(IS_WIN)
+#if BUILDFLAG(IS_WIN)
   base::win::ScopedCoMem<wchar_t> path;
   if (SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr,
                                        &path))) {
@@ -57,19 +53,39 @@ base::FilePath DefaultDownloadDir() {
 }
 
 // Off the engine thread: a free name in |dir| for what |url| sent.
-base::FilePath ChooseTarget(base::FilePath dir,
+download::DownloadTargetInfo ChooseTarget(base::FilePath dir,
                             GURL url,
                             std::string content_disposition,
                             std::string suggested_name,
                             std::string mime_type) {
+  download::DownloadTargetInfo target;
+  base::FilePath name =
+      net::GenerateFileName(url, content_disposition, std::string(),
+                            suggested_name, mime_type, "download");
+#if BUILDFLAG(IS_ANDROID)
+  if (dir.empty()) {
+    // Scoped storage requires MediaStore for shared Downloads. Chromium's
+    // GetDownloadsDirectory is app-specific and disappears on uninstall.
+    auto [uri, display_name] = android::CreatePublicDownload(
+        name.AsUTF8Unsafe(), mime_type, url.spec());
+    target.target_path = uri;
+    target.intermediate_path = target.target_path;
+    if (target.target_path.empty()) {
+      target.interrupt_reason = download::DOWNLOAD_INTERRUPT_REASON_FILE_FAILED;
+    } else {
+      target.display_name = display_name;
+    }
+    return target;
+  }
+#endif
   if (dir.empty()) {
     dir = DefaultDownloadDir();
   }
   base::CreateDirectory(dir);
-  base::FilePath name =
-      net::GenerateFileName(url, content_disposition, std::string(),
-                            suggested_name, mime_type, "download");
-  return base::GetUniquePath(dir.Append(name));
+  target.target_path = base::GetUniquePath(dir.Append(name));
+  target.intermediate_path =
+      target.target_path.AddExtension(FILE_PATH_LITERAL("crdownload"));
+  return target;
 }
 
 const char* StateName(download::DownloadItem::DownloadState state) {
@@ -136,19 +152,8 @@ bool DownloadDelegate::DetermineDownloadTarget(
       base::BindOnce(&ChooseTarget, State().download_dir, item->GetURL(),
                      item->GetContentDisposition(),
                      item->GetSuggestedFilename(), item->GetMimeType()),
-      base::BindOnce(&DownloadDelegate::OnTargetChosen,
-                     weak_factory_.GetWeakPtr(), item->GetId(),
-                     std::move(*callback)));
+      std::move(*callback));
   return true;
-}
-
-void DownloadDelegate::OnTargetChosen(uint32_t id,
-                                      download::DownloadTargetCallback callback,
-                                      const base::FilePath& path) {
-  download::DownloadTargetInfo target;
-  target.target_path = path;
-  target.intermediate_path = path.AddExtension(FILE_PATH_LITERAL("crdownload"));
-  std::move(callback).Run(std::move(target));
 }
 
 void DownloadDelegate::OnDownloadCreated(content::DownloadManager* manager,
@@ -185,7 +190,7 @@ void DownloadDelegate::Report(download::DownloadItem* item) {
   view->Emit(base::DictValue()
                  .Set("type", "download")
                  .Set("id", static_cast<int>(item->GetId()))
-                 .Set("file_name", path.BaseName().AsUTF8Unsafe())
+                 .Set("file_name", item->GetFileNameToReportUser().AsUTF8Unsafe())
                  .Set("path", path.AsUTF8Unsafe())
                  .Set("url", item->GetURL().spec())
                  .Set("received", static_cast<double>(item->GetReceivedBytes()))

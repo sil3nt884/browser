@@ -107,8 +107,16 @@ in the `chorium-work` volume. Windows is cross-compiled
    `JOBS` at 6; 10 ran out of memory. A full build is a few hours; after
    that, changing Chorium's own files rebuilds in about 3 minutes.
 
-Builds are capped (`--cpus`, `--memory`) and run at the lowest priority
-inside the container, so the PC stays usable.
+Builds are capped (`--cpus`, `--memory`) and use CPU nice level 5 and
+best-effort I/O priority 7. Set `BUILD_NICE=19 BUILD_IO_CLASS=3` for the old
+idle-only scheduling. On this 16 GB PC use six jobs for full builds; eight
+jobs work for small incremental edits. Keep the existing `chorium-work`
+volume: after the first Chromium compile, only changed targets rebuild.
+Measured on this PC: Java-only APK edits took 30-35 seconds; a native
+download change, including relinking Chromium, took 63 seconds. Changes to
+GN build files can also require regenerating the build graph.
+App-only changes need `build_wasm.sh app browser` followed by `build.sh android`;
+without native changes the latter only repackages the APK.
 
 **Android** (arm64): `build.sh android` builds `out/chorium-android/apks/
 Chorium.apk` (engine, runtime, Wasmtime and the app in one APK). Before it:

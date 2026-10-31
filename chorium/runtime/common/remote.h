@@ -54,6 +54,7 @@ void remote_icon(int icon, int x, int y, int w, int h);
 void remote_page(uint32_t page_id, int x, int y, int w, int h);
 void remote_clip(int x, int y, int w, int h);
 void remote_unclip(void);
+void remote_begin_frame(void);
 void remote_present(void);
 void remote_page_frame(void); /* a page frame arrived (Windows) */
 void remote_keyboard(bool shown);

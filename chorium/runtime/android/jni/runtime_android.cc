@@ -469,6 +469,10 @@ static void JNI_ChoriumNatives_Draw(JNIEnv* env) {
   app_call("on-draw");
 }
 
+static void JNI_ChoriumNatives_FramePresented(JNIEnv* env) {
+  remote_present();
+}
+
 static void JNI_ChoriumNatives_Pointer(JNIEnv* env, jint type, jfloat x, jfloat y) {
   // x, y in CSS pixels. 0 down, 1 move, 2 up, 3 cancel.
   switch (type) {

@@ -203,7 +203,11 @@ public class ChoriumActivity extends Activity {
         }
         WindowManager.LayoutParams params = getWindow().getAttributes();
         params.preferredDisplayModeId = best.getModeId();
+        params.preferredRefreshRate = best.getRefreshRate();
         getWindow().setAttributes(params);
+        if (Build.VERSION.SDK_INT >= 35) {
+            getWindow().getDecorView().setRequestedFrameRate(best.getRefreshRate());
+        }
     }
 
     /** The MIME types for a page's accept list (".png", "image/*"). */
@@ -288,6 +292,15 @@ public class ChoriumActivity extends Activity {
     void openFile(String path, boolean inFolder) {
         if (inFolder) {
             startQuietly(new Intent(DownloadManager.ACTION_VIEW_DOWNLOADS));
+            return;
+        }
+        if (path.startsWith("content://")) {
+            Uri uri = Uri.parse(path);
+            Intent view = new Intent(Intent.ACTION_VIEW);
+            String mime = getContentResolver().getType(uri);
+            view.setDataAndType(uri, mime != null ? mime : "*/*");
+            view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startQuietly(Intent.createChooser(view, null));
             return;
         }
         // The file's content:// URI comes from the media scanner, which also
