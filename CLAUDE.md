@@ -27,6 +27,20 @@ logs and normal Windows/phone app data. Treat the historical Docker/output
 paths below as disposable: removing chorium-work loses the incremental cache
 and the next native build must fetch/compile Chromium again.
 
+Cleanup status: Chorium's three Docker containers, chorium-build:157 image,
+chorium-work source volume and build cache are removed; Docker reports zero
+objects and Docker Desktop is stopped. Automatic approval review rejected
+the agent's Windows filesystem deletion command with "blocked by policy".
+The local repository, copied SDK, old outputs and old packages therefore
+remain. Do not bypass that rejection with a different deletion method.
+Reviewable manual helpers are in the retained release folder:
+`C:\me-tor\Chorium\Finish-Chorium-Cleanup.ps1` and
+`C:\me-tor\Chorium\Compact-Docker-Disk.ps1`. The latter requires Windows
+administrator rights to compact Docker's non-sparse ~94 GB data VHDX.
+The combined helper checks a clean source tree and the verified remote
+commit before removing only the listed project paths. Ubuntu WSL, normal
+profiles, the final releases and ADB tools are retained.
+
 ## Continuation (2026-10-31)
 
 Chorium's previously failed Docker Windows build now succeeds, including

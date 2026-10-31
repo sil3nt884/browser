@@ -31,6 +31,13 @@ rebuilt three objects and relinked in 83 seconds; Android repackaging took
 31 seconds. Local source/build cleanup was requested after a verified Git
 push; final releases, validation logs and normal app data must be retained.
 
+Cleanup result: Docker now contains zero containers, images, volumes or
+build-cache entries, and Docker Desktop is stopped. Host source/SDK/output
+deletion was rejected by automatic approval review ("blocked by policy"),
+so those Windows files remain. Manual cleanup and administrator VHDX
+compaction helpers are retained beside the final release. No alternative
+deletion mechanism was used to bypass the review rejection.
+
 The failed Docker Windows build is repaired. Claude's downloads, file picker,
 context menu, remote control and real-app test work is integrated with persistent
 site data, RAM HTTP caching, Windows cookie encryption and privacy controls.
