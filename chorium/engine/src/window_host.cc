@@ -71,12 +71,20 @@ WindowHost::WindowHost() {
   OnAcceleratedWidgetAvailable();
   focus_client_ = std::make_unique<FocusClient>();
   aura::client::SetFocusClient(window(), focus_client_.get());
+  aura::client::SetWindowParentingClient(window(), this);
 }
 
 WindowHost::~WindowHost() {
+  aura::client::SetWindowParentingClient(window(), nullptr);
   aura::client::SetFocusClient(window(), nullptr);
   DestroyCompositor();
   DestroyDispatcher();
+}
+
+aura::Window* WindowHost::GetDefaultParent(aura::Window*,
+                                          const gfx::Rect&,
+                                          int64_t) {
+  return window();
 }
 
 bool WindowHost::CanDispatchEvent(const ui::PlatformEvent& event) {

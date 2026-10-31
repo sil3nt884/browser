@@ -1152,6 +1152,19 @@ void exports_app_on_input(app_input_t* event) {
 }
 
 void exports_app_on_page_event(uint32_t page_id, app_page_event_t* event) {
+  if (event->tag == UMBRA_CHORIUM_TYPES_PAGE_EVENT_NEW_WINDOW) {
+    /* Opening a tab is this app's policy, not the native engine's. Keep
+     * empty window.open() requests blank rather than opening the home page. */
+    char url[2048];
+    copy_str(url, sizeof url, &event->val.new_window);
+    app_page_event_free(event);
+    open_tab_with(url[0] ? url : "about:blank", true);
+    g_focus = FOCUS_PAGE;
+    g_menu_open = false;
+    focus_page(true);
+    draw();
+    return;
+  }
   umbra_browser_browser_list_browser_event_t events;
   umbra_browser_browser_handle_page_event(page_id, event, &events);
   app_page_event_free(event);

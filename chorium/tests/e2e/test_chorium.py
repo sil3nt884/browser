@@ -271,6 +271,45 @@ class Sandbox(ChoriumTest):
 
 
 class Regressions(ChoriumTest):
+    def test_window_open_w3schools(self):
+        if not NETWORK:
+            self.skipTest("needs --network")
+        source = self.home()
+        source.eval('window.open("https://www.w3schools.com"); true')
+        opened = self.b.page("https://www.w3schools.com", timeout=60)
+        self.assertIn("w3schools", opened.eval("document.title").lower())
+        self.assertEqual(source.eval("document.title"), "E2E home")
+
+    def test_window_open_from_javascript(self):
+        self.b.set_tor(False)
+        source = self.b.go(SERVER.url("/pages/popup.html"), "/pages/popup.html")
+        before = len(cdp.targets(self.t.devtools_port))
+        source.eval("window.open('/pages/second.html'); true")
+        opened = self.b.page("/pages/second.html")
+        self.assertEqual(len(cdp.targets(self.t.devtools_port)), before + 1)
+        self.assertEqual(source.eval("document.title"), "Popup source")
+        self.r.wait_text(SERVER.url("/pages/second.html"), exact=True)
+        self.assertEqual(opened.eval("document.title"), "E2E second")
+
+    def test_window_open_from_click(self):
+        self.b.set_tor(False)
+        source = self.b.go(SERVER.url("/pages/popup.html"), "/pages/popup.html")
+        before = len(cdp.targets(self.t.devtools_port))
+        self.b.tap_element(source, "#open")
+        self.b.page("/pages/second.html")
+        self.assertEqual(len(cdp.targets(self.t.devtools_port)), before + 1)
+        self.assertEqual(source.eval("document.title"), "Popup source")
+        self.r.wait_text(SERVER.url("/pages/second.html"), exact=True)
+
+    def test_window_open_target_blank(self):
+        self.b.set_tor(False)
+        source = self.b.go(SERVER.url("/pages/popup.html"), "/pages/popup.html")
+        before = len(cdp.targets(self.t.devtools_port))
+        self.b.tap_element(source, "#blank")
+        self.b.page("/pages/second.html")
+        self.assertEqual(len(cdp.targets(self.t.devtools_port)), before + 1)
+        self.assertEqual(source.eval("document.title"), "Popup source")
+
     def test_address_bar_edits_long_unicode_text(self):
         self.b.set_tor(False)
         prefix = SERVER.url("/pages/index.html") + "?q=" + "a" * 180

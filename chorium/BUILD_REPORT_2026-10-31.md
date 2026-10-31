@@ -1,5 +1,36 @@
 # Chorium continuation — 2026-10-31
 
+## Final release
+
+`window.open()` had a native Windows access violation in
+`aura::client::ParentWindowWithContext`: the windowless host had no parenting
+client. The host now supplies its root as the generic native parent. Opening
+the requested URL as a foreground tab is handled explicitly in the browser
+app; empty requests stay blank. No native tab/window UI policy was added.
+The existing URL-request contract still does not preserve a popup's returned
+WindowProxy/opener relationship.
+
+Four real-app popup tests pass on Windows and the connected Redmi: direct
+JavaScript, a real button click, a target=_blank link, and the user's exact
+`window.open("https://www.w3schools.com")` example. The opener remains alive.
+Shared app tests: 206 checks in 21 desktop/phone scenarios pass. Windows was
+tested hidden to avoid reopening visible windows. Logs are retained with the
+release. Android's separate 120 Hz failure remains open.
+
+Final artifacts in `C:\me-tor\Chorium`:
+
+- `Chorium-Windows-Final\Chorium.exe` (portable folder)
+- `Chorium-157.0.8103.15-Windows-x64-20261031-Final.zip`
+- `Chorium-157.0.8103.15-Android-arm64-20261031-Final.apk`
+- `SHA256SUMS.txt` and per-archive `.sha256` files
+
+All 15 files in the Windows ZIP match the portable folder. Both archives
+pass CRC checks, and the APK's browser.wasm exactly matches Windows'.
+The final APK is installed on the phone. The final Windows native change
+rebuilt three objects and relinked in 83 seconds; Android repackaging took
+31 seconds. Local source/build cleanup was requested after a verified Git
+push; final releases, validation logs and normal app data must be retained.
+
 The failed Docker Windows build is repaired. Claude's downloads, file picker,
 context menu, remote control and real-app test work is integrated with persistent
 site data, RAM HTTP caching, Windows cookie encryption and privacy controls.

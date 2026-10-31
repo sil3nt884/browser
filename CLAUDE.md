@@ -1,5 +1,32 @@
 # Umbra: notes for Claude Code
 
+## Final release and cleanup handoff (2026-10-31)
+
+Latest portable Windows app: `C:\me-tor\Chorium\Chorium-Windows-Final\Chorium.exe`.
+Final Windows ZIP and Android APK in `C:\me-tor\Chorium` end in
+`20261031-Final.zip` / `20261031-Final.apk`, with SHA-256 checksums.
+Both packages contain the same browser.wasm; archive integrity and every
+Windows ZIP file were verified against the portable folder.
+
+JavaScript `window.open(url)`, button-triggered opens, `target="_blank"`,
+and the exact W3Schools example pass four real-app tests on each platform.
+The app chooses a foreground tab (and keeps empty requests blank). Native
+popup hosting now installs Aura's missing WindowParentingClient; without it
+Windows crashed in ParentWindowWithContext before delivering the request.
+The DLL still does not decide tab/window UI policy. The URL-request contract
+does not adopt the original popup WebContents or preserve its WindowProxy.
+Shared checks now pass 206 assertions in 21 desktop/phone scenarios.
+Address editing passed three real-app tests per platform. Earlier full-suite
+results remain below; Android's separate 60 fps on a 120 Hz display remains
+unresolved and must not be represented as a fully passing Android suite.
+
+The user requested a push followed by removal of local source/build files,
+Chorium containers and build caches. Cleanup must happen only after the push
+is verified on origin/main. Preserve the final release directory, validation
+logs and normal Windows/phone app data. Treat the historical Docker/output
+paths below as disposable: removing chorium-work loses the incremental cache
+and the next native build must fetch/compile Chromium again.
+
 ## Continuation (2026-10-31)
 
 Chorium's previously failed Docker Windows build now succeeds, including

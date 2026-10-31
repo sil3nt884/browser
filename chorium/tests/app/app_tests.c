@@ -473,6 +473,12 @@ static void new_window_opens_tab(void) {
   CHECK(open_pages() == before + 1);
   CHECK(called("load_url") &&
         strstr(last_call("load_url"), "https://popup.example/"));
+  CHECK(shown("popup.example")); /* the app follows the requested tab */
+  before = open_pages();
+  clear_calls();
+  engine_event(newest_page(), "{\"type\":\"new_window\",\"url\":\"\"}");
+  CHECK(open_pages() == before + 1);
+  CHECK(!called("load_url")); /* window.open() stays blank */
   stop();
 }
 

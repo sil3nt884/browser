@@ -14,6 +14,7 @@
 #include "base/observer_list.h"
 #include "base/scoped_observation.h"
 #include "ui/aura/client/focus_client.h"
+#include "ui/aura/client/window_parenting_client.h"
 #include "ui/aura/window_observer.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/display/screen_base.h"
@@ -26,12 +27,18 @@ namespace chorium {
 // composited into it and captured from there, never drawn on a screen.
 // Same approach as Chromium's own //headless layer.
 class WindowHost : public aura::WindowTreeHost,
+                   public aura::client::WindowParentingClient,
                    public ui::PlatformEventDispatcher {
  public:
   WindowHost();
   WindowHost(const WindowHost&) = delete;
   WindowHost& operator=(const WindowHost&) = delete;
   ~WindowHost() override;
+
+  // Native popup views need a parent before the app receives the request.
+  aura::Window* GetDefaultParent(aura::Window* window,
+                                const gfx::Rect& bounds,
+                                int64_t display_id) override;
 
   // ui::PlatformEventDispatcher:
   bool CanDispatchEvent(const ui::PlatformEvent& event) override;
