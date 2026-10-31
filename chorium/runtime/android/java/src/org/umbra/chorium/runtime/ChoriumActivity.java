@@ -4,13 +4,20 @@
 package org.umbra.chorium.runtime;
 
 import android.app.Activity;
+import android.app.DownloadManager;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Intent;
 import android.graphics.Insets;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.Display;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
+import android.webkit.MimeTypeMap;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
 import android.widget.FrameLayout;
@@ -29,8 +36,12 @@ import org.chromium.ui.base.IntentRequestTracker;
 import org.umbra.chorium.engine.PageHost;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 
 /**
  * Chorium's runtime on Android: starts the engine (Chromium and Tor), then runs the app
@@ -40,6 +51,8 @@ import java.io.InputStream;
 public class ChoriumActivity extends Activity {
     /** The app in the APK's assets, as built by chorium/docker/build_wasm.sh. */
     private static final String APP = "browser";
+    /** startActivityForResult code of the file picker. */
+    private static final int REQUEST_PICK_FILES = 0x4317;
 
     private FrameLayout mRoot;
     private AppView mAppView;
@@ -51,6 +64,9 @@ public class ChoriumActivity extends Activity {
     /** The app has something to go back to (see setBackEnabled). */
     private boolean mBackEnabled;
     private @Nullable OnBackInvokedCallback mBackCallback;
+    /** The app's request id for the open file picker, or -1. */
+    private int mPickRequest = -1;
+    private String mDataDir;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -60,6 +76,19 @@ public class ChoriumActivity extends Activity {
         // As content shell: a phone gets Chrome's mobile user agent.
         DeviceUtils.updateDeviceSpecificUserAgentSwitch(this);
         LibraryLoader.getInstance().ensureInitialized();
+        mDataDir = getFilesDir().getPath();
+        String testProfile = getIntent() != null ? getIntent().getStringExtra("data_dir") : null;
+        if (getIntent() != null && getIntent().getBooleanExtra("remote_control", false)
+                && testProfile != null && testProfile.matches("[A-Za-z0-9_-]+")) {
+            // Test extras can arrive through an exported activity. Keep every
+            // fresh-profile deletion under a dedicated test-only directory.
+            mDataDir += "/test-profiles/" + testProfile;
+            if (getIntent().getBooleanExtra("data_dir_fresh", false)) {
+                deleteTree(new File(mDataDir));
+            }
+            new File(mDataDir).mkdirs();
+        }
+        ChoriumNativesJni.get().profile(mDataDir + "/profile");
 
         mRoot = new FrameLayout(this);
         // Android 15+ draws apps edge to edge: keep the app and its pages
@@ -77,6 +106,7 @@ public class ChoriumActivity extends Activity {
                 return WindowInsets.CONSUMED;
             });
         }
+        useFastestRefreshRate();
         mAppView = new AppView(this);
         mRoot.addView(mAppView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
@@ -121,7 +151,13 @@ public class ChoriumActivity extends Activity {
         String url = urlFromIntent(getIntent());
         String[] args = url != null ? new String[] {APP + ".wasm", url}
                                     : new String[] {APP + ".wasm"};
-        if (ChoriumNativesJni.get().start(wasm, APP, getFilesDir().getPath(), args)) {
+        // The end-to-end tests' remote control (runtime/common/remote.h):
+        // adb shell am start ... --ez remote_control true
+        boolean remote = getIntent() != null
+                && getIntent().getBooleanExtra("remote_control", false);
+        // ... --es data_dir NAME: the app's files in their own folder (the
+        // tests' profile, so they never touch the person's own).
+        if (ChoriumNativesJni.get().start(wasm, APP, mDataDir, args, remote)) {
             mRunning = true;
             mAppView.setStarted();
         }
@@ -132,6 +168,14 @@ public class ChoriumActivity extends Activity {
         return data != null ? data.toString() : null;
     }
 
+    private static void deleteTree(File file) {
+        File[] children = file.listFiles();
+        if (children != null) {
+            for (File child : children) deleteTree(child);
+        }
+        file.delete();
+    }
+
     private byte[] readAsset(String name) throws IOException {
         try (InputStream in = getAssets().open(name)) {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -139,6 +183,133 @@ public class ChoriumActivity extends Activity {
             int n;
             while ((n = in.read(buffer)) > 0) out.write(buffer, 0, n);
             return out.toByteArray();
+        }
+    }
+
+    /**
+     * Many phones run apps at 60 Hz unless they ask for more: ask for the display's fastest
+     * mode at its current resolution.
+     */
+    private void useFastestRefreshRate() {
+        Display display = getWindowManager().getDefaultDisplay();
+        Display.Mode current = display.getMode();
+        Display.Mode best = current;
+        for (Display.Mode mode : display.getSupportedModes()) {
+            if (mode.getPhysicalWidth() == current.getPhysicalWidth()
+                    && mode.getPhysicalHeight() == current.getPhysicalHeight()
+                    && mode.getRefreshRate() > best.getRefreshRate()) {
+                best = mode;
+            }
+        }
+        WindowManager.LayoutParams params = getWindow().getAttributes();
+        params.preferredDisplayModeId = best.getModeId();
+        getWindow().setAttributes(params);
+    }
+
+    /** The MIME types for a page's accept list (".png", "image/*"). */
+    private static List<String> mimeTypes(String[] accept) {
+        List<String> types = new ArrayList<>();
+        for (String type : accept) {
+            if (type.startsWith(".")) {
+                String mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                        type.substring(1).toLowerCase(Locale.ROOT));
+                if (mime != null) types.add(mime);
+            } else if (type.contains("/")) {
+                types.add(type);
+            }
+        }
+        return types;
+    }
+
+    /** chorium.wit's file-chooser-mode: 0 open, 1 open-multiple, 2 open-folder, 3 save. */
+    void pickFiles(int request, int mode, String[] accept, String defaultName) {
+        if (mPickRequest >= 0) {
+            ChoriumNativesJni.get().filesPicked(request, new String[0]);
+            return;
+        }
+        Intent intent;
+        List<String> types = mimeTypes(accept);
+        if (mode == 3) {
+            intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            intent.setType(types.size() == 1 ? types.get(0) : "*/*");
+            if (!defaultName.isEmpty()) intent.putExtra(Intent.EXTRA_TITLE, defaultName);
+        } else {
+            // A folder upload becomes a pick of several files: the system
+            // folder picker hands out a tree that no page can read.
+            intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            if (types.size() == 1) {
+                intent.setType(types.get(0));
+            } else {
+                intent.setType("*/*");
+                if (!types.isEmpty()) {
+                    intent.putExtra(Intent.EXTRA_MIME_TYPES, types.toArray(new String[0]));
+                }
+            }
+            if (mode != 0) intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        }
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        try {
+            startActivityForResult(intent, REQUEST_PICK_FILES);
+            mPickRequest = request;
+        } catch (ActivityNotFoundException e) {
+            ChoriumNativesJni.get().filesPicked(request, new String[0]);
+        }
+    }
+
+    /** The remote control answers the open picker (tests); false if none is open. */
+    boolean answerPicker(String[] uris) {
+        if (mPickRequest < 0) return false;
+        int request = mPickRequest;
+        mPickRequest = -1;
+        finishActivity(REQUEST_PICK_FILES);
+        if (mRunning) ChoriumNativesJni.get().filesPicked(request, uris);
+        return true;
+    }
+
+    private void onFilesPicked(int resultCode, @Nullable Intent data) {
+        if (mPickRequest < 0) return; // already answered (answerPicker)
+        int request = mPickRequest;
+        mPickRequest = -1;
+        List<String> uris = new ArrayList<>();
+        if (resultCode == RESULT_OK && data != null) {
+            ClipData clip = data.getClipData();
+            if (clip != null) {
+                for (int i = 0; i < clip.getItemCount(); i++) {
+                    uris.add(clip.getItemAt(i).getUri().toString());
+                }
+            } else if (data.getData() != null) {
+                uris.add(data.getData().toString());
+            }
+        }
+        if (mRunning) ChoriumNativesJni.get().filesPicked(request, uris.toArray(new String[0]));
+    }
+
+    /** Opens a download with its app, or shows the Downloads list. */
+    void openFile(String path, boolean inFolder) {
+        if (inFolder) {
+            startQuietly(new Intent(DownloadManager.ACTION_VIEW_DOWNLOADS));
+            return;
+        }
+        // The file's content:// URI comes from the media scanner, which also
+        // makes sure the Files app lists it.
+        MediaScannerConnection.scanFile(this, new String[] {path}, null, (scanned, uri) -> {
+            if (uri == null) return;
+            String extension =
+                    MimeTypeMap.getFileExtensionFromUrl(Uri.fromFile(new File(scanned)).toString());
+            String mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                    extension.toLowerCase(Locale.ROOT));
+            Intent view = new Intent(Intent.ACTION_VIEW);
+            view.setDataAndType(uri, mime != null ? mime : "*/*");
+            view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            runOnUiThread(() -> startQuietly(Intent.createChooser(view, null)));
+        });
+    }
+
+    private void startQuietly(Intent intent) {
+        try {
+            startActivity(intent);
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, "No app can open this", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -228,6 +399,10 @@ public class ChoriumActivity extends Activity {
     @Override
     public void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_PICK_FILES) {
+            onFilesPicked(resultCode, data);
+            return;
+        }
         mIntentRequestTracker.onActivityResult(requestCode, resultCode, data);
     }
 

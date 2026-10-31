@@ -14,9 +14,16 @@
 #include <windowsx.h>
 
 #include "host.h"
+#include "remote.h"
+
+/* The C runtime uses explicitly bounded Win32 buffers. */
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+#endif
 
 HWND g_hwnd;
 float g_scale = 1.0f;
+const char* g_data_dir;
 
 static const char* const kModifiers[] = {"shift", "ctrl", "alt", "meta"};
 static int g_last_tor = -2;
@@ -24,6 +31,24 @@ static uint32_t g_clicks; /* click count of the last button press */
 static bool g_tracking_leave;
 static bool g_minimized;
 static wchar_t g_high_surrogate;
+static HMONITOR g_monitor; /* the one the window was last on */
+
+/* Pages draw at the refresh rate of the monitor the window is on. */
+static void update_frame_rate(void) {
+  HMONITOR monitor = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+  MONITORINFOEXW mi;
+  DEVMODEW mode;
+  ZeroMemory(&mi, sizeof mi);
+  ZeroMemory(&mode, sizeof mode);
+  ((MONITORINFO*)&mi)->cbSize = sizeof mi;
+  mode.dmSize = sizeof mode;
+  g_monitor = monitor;
+  if (GetMonitorInfoW(monitor, (MONITORINFO*)&mi) &&
+      EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
+      mode.dmDisplayFrequency > 1) {
+    chorium_set_frame_rate((int)mode.dmDisplayFrequency);
+  }
+}
 
 /* --- title bar ---------------------------------------------------------- */
 
@@ -303,6 +328,14 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp,
       }
       app_call("on-draw");
       return 0;
+    case WM_DISPLAYCHANGE:
+      update_frame_rate();
+      break;
+    case WM_WINDOWPOSCHANGED:
+      if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != g_monitor) {
+        update_frame_rate();
+      }
+      break; /* DefWindowProc sends WM_SIZE and WM_MOVE */
     case WM_DPICHANGED: {
       /* Pages keep rendering at the scale Chorium started with; the
        * surface scales them. */
@@ -406,6 +439,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp,
     }
     case WM_APP_FRAME: {
       uint32_t id = (uint32_t)wp;
+      remote_page_frame();
       if (id >= 1 && id <= MAX_PAGES) {
         InterlockedExchange(&g_win_pages[id].frame_posted, 0);
         if (page_alive(id)) {
@@ -423,6 +457,12 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp,
     case WM_APP_DRAW:
       app_call("on-draw");
       return 0;
+    case WM_APP_PICK:
+      win_run_picker((void*)lp);
+      return 0;
+    case WM_APP_CALL:
+      ((void (*)(void*))wp)((void*)lp);
+      return 0;
     case WM_CLOSE:
       app_call("on-stop");
       DestroyWindow(hwnd);
@@ -435,11 +475,36 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp,
 }
 
 int main(int argc, char** argv) {
+  /* Chromium's sandbox lives in this .exe (sandbox_win.cc); every process,
+   * helpers included, hands it to the engine first. */
+  host_set_sandbox();
   int code = chorium_execute_process();
   if (code >= 0) {
     return code; /* a Chromium helper process */
   }
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+  /* --remote-control (anywhere, not passed on): the end-to-end tests'
+   * remote control on 127.0.0.1:REMOTE_PORT, and DevTools on the port
+   * after it (tests/e2e). */
+  /* --data-dir=<folder>: the app's files there instead of %LOCALAPPDATA%
+   * (the tests' own profile). */
+  bool remote = false;
+  for (int i = 1; i < argc; ++i) {
+    bool ours = true;
+    if (strcmp(argv[i], "--remote-control") == 0) {
+      remote = true;
+    } else if (strncmp(argv[i], "--data-dir=", 11) == 0) {
+      g_data_dir = argv[i] + 11;
+    } else {
+      ours = false;
+    }
+    if (ours) {
+      memmove(&argv[i], &argv[i + 1], sizeof(char*) * (size_t)(argc - i));
+      --argc;
+      --i;
+    }
+  }
 
   /* Chorium.exe [app.wasm] [args for the app...]. Without an app (double-
    * clicked, or only a URL given) the app comes from the apps folder. */
@@ -464,6 +529,25 @@ int main(int argc, char** argv) {
                  chorium_abi_version(), CHORIUM_ABI_VERSION);
     return 1;
   }
+  if (remote) {
+    chorium_enable_devtools(REMOTE_PORT + 1);
+  }
+  char profile[MAX_PATH * 3];
+  char data_root[MAX_PATH * 3];
+  if (g_data_dir) {
+    snprintf(profile, sizeof profile, "%s\\profile", g_data_dir);
+  } else {
+    wchar_t local[MAX_PATH];
+    DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+    if (!len || len >= MAX_PATH ||
+        !WideCharToMultiByte(CP_UTF8, 0, local, -1, data_root,
+                             sizeof data_root, NULL, NULL)) {
+      loader_error("Cannot find the local app data directory.");
+      return 1;
+    }
+    snprintf(profile, sizeof profile, "%s\\Chorium\\profile", data_root);
+  }
+  chorium_set_profile_dir(profile);
   if (chorium_init(g_scale) != 0) {
     loader_error("The engine (chorium.dll) didn't start.");
     return 1;
@@ -512,7 +596,12 @@ int main(int argc, char** argv) {
   app_start(app_argc, app_args);
   free(app_args);
   ShowWindow(g_hwnd, SW_SHOWDEFAULT);
+  update_frame_rate();
   SetTimer(g_hwnd, 1, 250, NULL); /* Tor progress */
+  if (remote && !remote_start()) {
+    loader_error("The remote control couldn't listen on port %d.",
+                 REMOTE_PORT);
+  }
 
   MSG msg;
   while (GetMessageW(&msg, NULL, 0, 0) > 0) {

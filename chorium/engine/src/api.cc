@@ -8,26 +8,36 @@
 #include <atomic>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "base/command_line.h"
 #include "base/compiler_specific.h"
 #include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/no_destructor.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
+#include "base/logging.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
 #include "content/public/app/content_main.h"
+#include "content/public/browser/storage_partition.h"
+#include "umbra/chorium/engine/src/browser_context.h"
 #include "sandbox/policy/switches.h"
 #include "umbra/app/tor_library.h"
 #include "umbra/chorium/interfaces/native/chorium.h"
+#include "umbra/chorium/engine/src/downloads.h"
 #include "umbra/chorium/engine/src/engine.h"
 #include "umbra/chorium/engine/src/view.h"
 
 #if BUILDFLAG(IS_WIN)
 #include <windows.h>
 
-#include "content/public/app/sandbox_helper_win.h"
+#include "sandbox/policy/mojom/sandbox.mojom-shared.h"
+#include "sandbox/policy/sandbox_type.h"
+#include "sandbox/win/src/sandbox.h"
 #include "sandbox/win/src/sandbox_types.h"
 #endif
 
@@ -41,6 +51,13 @@ using chorium::View;
 
 std::atomic<int> g_phase{0};  // 0 not started, 1 running, 2 stopped
 
+#if BUILDFLAG(IS_WIN)
+// The app's sandbox services (chorium_set_sandbox), or null: helpers run
+// unsandboxed.
+sandbox::BrokerServices* g_broker_services = nullptr;
+sandbox::TargetServices* g_target_services = nullptr;
+#endif
+
 chorium::MainDelegate* Delegate() {
   static base::NoDestructor<chorium::MainDelegate> delegate;
   return delegate.get();
@@ -50,9 +67,29 @@ chorium::MainDelegate* Delegate() {
 int RunContentMain(chorium::MainDelegate* delegate) {
   content::ContentMainParams params(delegate);
   params.instance = ::GetModuleHandle(nullptr);
-  static base::NoDestructor<sandbox::SandboxInterfaceInfo> sandbox_info;
-  content::InitializeSandboxInfo(sandbox_info.get());
-  params.sandbox_info = sandbox_info.get();
+  static base::NoDestructor<sandbox::SandboxInterfaceInfo> info;
+  *info = {};
+  if (g_broker_services || g_target_services) {
+    // As content::InitializeSandboxInfo, with the .exe's services.
+    const base::CommandLine& command_line =
+        *base::CommandLine::ForCurrentProcess();
+    const bool is_browser =
+        command_line.GetSwitchValueASCII(sandbox::policy::switches::kProcessType)
+            .empty();
+    const bool is_sandboxed =
+        sandbox::policy::SandboxTypeFromCommandLine(command_line) !=
+        sandbox::mojom::Sandbox::kNoSandbox;
+    if (is_browser) {
+      info->broker_services = g_broker_services;
+      info->broker_services->RatchetDownSecurityMitigations(
+          sandbox::MITIGATION_DEP | sandbox::MITIGATION_DEP_NO_ATL_THUNK |
+          sandbox::MITIGATION_HARDEN_TOKEN_IL_POLICY);
+    } else if (is_sandboxed) {
+      info->target_services = g_target_services;
+    }
+    // Unsandboxed helpers get neither (they would act as brokers).
+  }
+  params.sandbox_info = info.get();
   return content::ContentMain(std::move(params));
 }
 
@@ -104,13 +141,42 @@ int chorium_execute_process(void) {
   if (!IsHelperProcess()) {
     return -1;
   }
-  // InitializeSandboxInfo() reads the command line before ContentMain()
-  // would set it up. A helper keeps the switches the browser gave it.
+  // RunContentMain() reads the command line before ContentMain() would set
+  // it up. A helper keeps the switches the browser gave it.
   base::CommandLine::Init(0, nullptr);
   return RunContentMain(Delegate());
 #else
   return -1;
 #endif
+}
+
+void chorium_set_profile_dir(const char* path) {
+  if (!chorium::State().started && g_phase == 0) {
+    chorium::State().profile_dir = base::FilePath::FromUTF8Unsafe(path ? path : "");
+  }
+}
+
+void chorium_clear_site_data(void) {
+  chorium::PostToEngine(base::BindOnce([] {
+    chorium::ClearSiteData(base::DoNothing());
+  }));
+}
+
+void chorium_set_clear_site_data_on_close(int on) {
+  chorium::PostToEngine(base::BindOnce([](bool enabled) {
+    auto& state = chorium::State();
+    state.clear_site_data_on_close = enabled;
+    if (!state.profile_dir.empty()) {
+      const auto marker = state.profile_dir.AddExtensionASCII("clear-on-close");
+      if (enabled) {
+        if (!base::WriteFile(marker, "1")) {
+          LOG(ERROR) << "Cannot save clear-on-close preference";
+        }
+      } else if (!base::DeleteFile(marker)) {
+        LOG(ERROR) << "Cannot remove clear-on-close marker";
+      }
+    }
+  }, on != 0));
 }
 
 int chorium_init(float scale) {
@@ -125,9 +191,12 @@ int chorium_init(float scale) {
   base::CommandLine::Init(0, nullptr);
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
   *command_line = base::CommandLine(command_line->GetProgram());
-  // TODO(chorium): ship chorium_sandbox.lib so apps can link Chromium's
-  // sandbox into their .exe; until then page processes run unsandboxed.
-  command_line->AppendSwitch(sandbox::policy::switches::kNoSandbox);
+#if BUILDFLAG(IS_WIN)
+  // The sandbox has to come from the app's .exe (chorium_set_sandbox).
+  if (!g_broker_services) {
+    command_line->AppendSwitch(sandbox::policy::switches::kNoSandbox);
+  }
+#endif
 
 #if BUILDFLAG(IS_WIN)
   g_engine_thread =
@@ -150,9 +219,17 @@ void chorium_shutdown(void) {
   }
   chorium::PostToEngine(base::BindOnce([] {
     chorium::EngineState& s = chorium::State();
-    s.started = false;
-    if (s.quit) {
-      std::move(s.quit).Run();
+    auto quit = base::BindOnce([] {
+      auto& state = chorium::State();
+      state.started = false;
+      if (state.quit) {
+        std::move(state.quit).Run();
+      }
+    });
+    if (s.clear_site_data_on_close) {
+      chorium::ClearSiteData(std::move(quit));
+    } else {
+      std::move(quit).Run();
     }
   }));
 #if BUILDFLAG(IS_WIN)
@@ -314,6 +391,79 @@ void chorium_set_dark_mode(int dark) {
         }
       },
       dark != 0));
+}
+
+void chorium_set_frame_rate(int hz) {
+  if (hz < 24 || hz > 1000) {
+    return;
+  }
+  chorium::PostToEngine(base::BindOnce(
+      [](int hz) {
+        if (chorium::State().frame_hz != hz) {
+          chorium::State().frame_hz = hz;
+          chorium::View::FrameRateChanged();
+        }
+      },
+      hz));
+}
+
+void chorium_enable_devtools(int port) {
+  // Read once, when the engine starts.
+  if (g_phase == 0 && port > 0 && port < 65536) {
+    chorium::State().devtools_port = port;
+  }
+}
+
+void chorium_set_download_dir(const char* utf8) {
+  chorium::PostToEngine(base::BindOnce(
+      [](std::string dir) {
+        chorium::State().download_dir = base::FilePath::FromUTF8Unsafe(dir);
+      },
+      Str(utf8)));
+}
+
+void chorium_cancel_download(int id) {
+  chorium::PostToEngine(base::BindOnce(&chorium::CancelDownload,
+                                       static_cast<uint32_t>(id)));
+}
+
+#if BUILDFLAG(IS_WIN)
+void chorium_set_sandbox(void* broker_services, void* target_services) {
+  g_broker_services = static_cast<sandbox::BrokerServices*>(broker_services);
+  g_target_services = static_cast<sandbox::TargetServices*>(target_services);
+}
+#endif
+
+void chorium_edit(chorium_view* view, int command) {
+  OnView(view, base::BindOnce([](int command, View* v) { v->Edit(command); },
+                              command));
+}
+
+void chorium_save_url(chorium_view* view, const char* url) {
+  OnView(view, base::BindOnce([](std::string url,
+                                 View* v) { v->SaveUrl(url); },
+                              Str(url)));
+}
+
+void chorium_copy_image_at(chorium_view* view, int x, int y) {
+  OnView(view, base::BindOnce([](int x, int y, View* v) { v->CopyImageAt(x, y); },
+                              x, y));
+}
+
+void chorium_file_chooser_reply(chorium_view* view,
+                                int id,
+                                const char* const* paths,
+                                int count) {
+  std::vector<std::string> files;
+  for (int i = 0; paths && i < count; ++i) {
+    // SAFETY: the C ABI promises |paths| holds |count| strings.
+    files.push_back(Str(UNSAFE_BUFFERS(paths[i])));
+  }
+  OnView(view, base::BindOnce(
+                   [](int id, std::vector<std::string> files, View* v) {
+                     v->FileChooserReply(id, files);
+                   },
+                   id, std::move(files)));
 }
 
 void chorium_focus(chorium_view* view, int focused) {

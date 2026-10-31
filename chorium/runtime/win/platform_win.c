@@ -13,6 +13,11 @@
 
 #include "host.h"
 
+/* The C runtime uses explicitly bounded Win32 buffers. */
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+#endif
+
 win_page g_win_pages[MAX_PAGES + 1];
 
 /* The window's timer polls Tor's progress all the time (main.c). */
@@ -82,8 +87,15 @@ void platform_page_closed(uint32_t page_id) {
   LeaveCriticalSection(&page->lock);
 }
 
-/* %LOCALAPPDATA%\Chorium\apps\<app name> */
+/* %LOCALAPPDATA%\Chorium\apps\<app name>, or --data-dir. */
 bool platform_app_data_dir(const char* app_name, char* out, size_t cap) {
+  if (g_data_dir) {
+    wchar_t wide[MAX_PATH];
+    if (MultiByteToWideChar(CP_UTF8, 0, g_data_dir, -1, wide, MAX_PATH)) {
+      SHCreateDirectoryExW(NULL, wide, NULL);
+    }
+    return snprintf(out, cap, "%s", g_data_dir) < (int)cap;
+  }
   wchar_t dir[MAX_PATH];
   if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE,
                               NULL, 0, dir))) {

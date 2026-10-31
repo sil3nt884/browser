@@ -1,5 +1,14 @@
 # Hooks into Chromium
 
+## packaged-vs-version
+
+`build/vs_toolchain.py`, `GetVisualStudioVersion()`: honors
+`CHORIUM_VS_VERSION` for a custom packaged SDK. Chorium's Docker scripts set
+it to 2022 when `WIN_TOOLCHAIN_HASH` is supplied. This prevents Chromium's
+VS 2026 default from repeatedly revalidating an installed VS 2022 package.
+Unsupported versions fail explicitly; without the variable upstream behavior
+is preserved. Apply just this build hook with `--only packaged-vs-version`.
+
 Everything Umbra does lives in `//umbra`. Chromium itself is edited in a
 handful of places by `scripts/hooks.py`. Each edit is marked in the source with
 `[umbra] <hook-name>`, so `git grep "\[umbra\]"` in Chromium's `src/` shows

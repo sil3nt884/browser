@@ -73,6 +73,8 @@ public class AppView extends View {
         "", // maximize (crop_square)
         "", // restore (filter_none)
         "", // close-window
+        "", // download (file_download)
+        "", // folder
     };
 
     private final Paint mFill = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -305,6 +307,35 @@ public class AppView extends View {
     }
 
     @CalledByNative
+    private static String readClipboard() {
+        if (sInstance == null) return "";
+        ClipboardManager clipboard = (ClipboardManager) sInstance.getContext().getSystemService(
+                Context.CLIPBOARD_SERVICE);
+        ClipData clip = clipboard.getPrimaryClip();
+        if (clip == null || clip.getItemCount() == 0) return "";
+        CharSequence text = clip.getItemAt(0).coerceToText(sInstance.getContext());
+        return text != null ? text.toString() : "";
+    }
+
+    /** The system file picker; the answer goes to ChoriumNatives.filesPicked. */
+    @CalledByNative
+    private static void pickFiles(int request, int mode, String[] accept, String defaultName) {
+        if (sInstance != null && sInstance.getContext() instanceof ChoriumActivity) {
+            ((ChoriumActivity) sInstance.getContext())
+                    .pickFiles(request, mode, accept, defaultName);
+        } else {
+            ChoriumNativesJni.get().filesPicked(request, new String[0]);
+        }
+    }
+
+    @CalledByNative
+    private static void openFile(String path, boolean inFolder) {
+        if (sInstance != null && sInstance.getContext() instanceof ChoriumActivity) {
+            ((ChoriumActivity) sInstance.getContext()).openFile(path, inFolder);
+        }
+    }
+
+    @CalledByNative
     private static void setTitle(String title) {
         if (sInstance != null && sInstance.getContext() instanceof Activity) {
             ((Activity) sInstance.getContext()).setTitle(title);
@@ -319,6 +350,11 @@ public class AppView extends View {
         if (sInstance.getContext() instanceof Activity) {
             ((Activity) sInstance.getContext()).finish();
         }
+    }
+
+    /** The running app's view, or null. */
+    static AppView instance() {
+        return sInstance;
     }
 
     // --- input ---------------------------------------------------------------

@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "base/functional/callback_helpers.h"
 #include "base/memory/raw_ptr.h"
@@ -15,6 +16,7 @@
 #include "base/timer/timer.h"
 #include "base/values.h"
 #include "build/build_config.h"
+#include "content/public/browser/file_select_listener.h"
 #include "content/public/browser/javascript_dialog_manager.h"
 #include "content/public/browser/web_contents_delegate.h"
 #include "content/public/browser/web_contents_observer.h"
@@ -66,6 +68,10 @@ class View : public content::WebContentsDelegate,
   static void CloseAll();
   // Applies changed preferences (the color scheme) to every page.
   static void PreferencesChanged();
+  // Applies State().frame_hz to every page.
+  static void FrameRateChanged();
+  // The view showing |web_contents|, else any view; null if none is open.
+  static View* ForWebContentsOrAny(content::WebContents* web_contents);
 
   View(const View&) = delete;
   View& operator=(const View&) = delete;
@@ -90,11 +96,18 @@ class View : public content::WebContentsDelegate,
   // Android: the page was pulled past its edge (see "overscroll" in
   // chorium.h). |dx| and |dy| are CSS pixels.
   void Overscroll(const char* kind, const char* phase, float dx, float dy);
+  // CHORIUM_EDIT_* on the focused text field.
+  void Edit(int command);
+  void SaveUrl(const std::string& url);
+  void CopyImageAt(int x, int y);
+  void FileChooserReply(int id, const std::vector<std::string>& paths);
+
+  // Sends |event| (JSON, see chorium.h) to the app.
+  void Emit(base::DictValue event);
 
  private:
   View(chorium_view* handle, int width, int height);
 
-  void Emit(base::DictValue event);
   content::RenderWidgetHost* Widget();
   void StartCapture();
   void EndWheel();
@@ -117,6 +130,9 @@ class View : public content::WebContentsDelegate,
   void CloseContents(content::WebContents* source) override;
   bool HandleContextMenu(content::RenderFrameHost& render_frame_host,
                          const content::ContextMenuParams& params) override;
+  void RunFileChooser(content::RenderFrameHost* render_frame_host,
+                      scoped_refptr<content::FileSelectListener> listener,
+                      const blink::mojom::FileChooserParams& params) override;
 #if BUILDFLAG(IS_ANDROID)
   void SetOverlayMode(bool use_overlay_mode) override;
 #endif
@@ -186,6 +202,13 @@ class View : public content::WebContentsDelegate,
   int buttons_down_ = 0;  // blink::WebInputEvent button modifier bits
   int next_dialog_id_ = 1;
   std::map<int, DialogClosedCallback> dialogs_;
+  // Open file choosers, by the id the app answers with, and their mode.
+  struct Chooser {
+    scoped_refptr<content::FileSelectListener> listener;
+    blink::mojom::FileChooserParams::Mode mode;
+  };
+  int next_chooser_id_ = 1;
+  std::map<int, Chooser> choosers_;
   // The last committed main-frame navigation: an error page commits as
   // chrome-error:// and then "finishes loading" like any other page.
   GURL committed_url_;

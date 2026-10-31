@@ -7,20 +7,36 @@
 #include <memory>
 
 #include "base/files/file_path.h"
+#include "build/build_config.h"
 #include "content/public/browser/browser_context.h"
+
+#if BUILDFLAG(IS_WIN)
+class PrefService;
+class CookieEncryptionProviderImpl;
+namespace os_crypt_async {
+class OSCryptAsync;
+}
+#endif
 
 namespace chorium {
 
-// The one profile all views share. Off the record: cookies, cache and storage
-// live in memory only and are gone when the engine stops. Anything that would
-// need a settings UI (permissions, downloads, certificate exceptions) is
-// absent, which means "deny".
+class DownloadDelegate;
+
+// The one profile all views share. Persistent only when the host supplies a
+// profile directory; the page cache always stays in RAM. Anything that would
+// need a settings UI (permissions, certificate exceptions) is absent, which
+// means "deny". Downloads go straight to the Downloads folder.
 class BrowserContext : public content::BrowserContext {
  public:
   BrowserContext();
   BrowserContext(const BrowserContext&) = delete;
   BrowserContext& operator=(const BrowserContext&) = delete;
   ~BrowserContext() override;
+#if BUILDFLAG(IS_WIN)
+  CookieEncryptionProviderImpl* cookie_encryption() {
+    return cookie_encryption_.get();
+  }
+#endif
 
   // content::BrowserContext:
   std::unique_ptr<content::ZoomLevelDelegate> CreateZoomLevelDelegate(
@@ -48,9 +64,15 @@ class BrowserContext : public content::BrowserContext {
       override;
 
  private:
-  // Chromium wants a path even for in-memory profiles. Nothing is written
-  // there, so it is never created.
   base::FilePath path_;
+  bool off_the_record_ = true;
+#if BUILDFLAG(IS_WIN)
+  // Destruction order: receivers, key providers, then the prefs they use.
+  std::unique_ptr<PrefService> local_state_;
+  std::unique_ptr<os_crypt_async::OSCryptAsync> os_crypt_;
+  std::unique_ptr<CookieEncryptionProviderImpl> cookie_encryption_;
+#endif
+  std::unique_ptr<DownloadDelegate> download_delegate_;
 };
 
 }  // namespace chorium

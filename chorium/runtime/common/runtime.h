@@ -34,6 +34,7 @@ typedef wasmtime_component_val_t val_t;
 
 val_t v_bool(bool b);
 val_t v_u32(uint32_t n);
+val_t v_u64(uint64_t n);
 val_t v_s32(int32_t n);
 val_t v_f32(float f);
 val_t v_string(const char* s, size_t len);
@@ -85,6 +86,9 @@ void app_start(int argc, char** argv);
 void app_input(val_t input);
 void app_page_event(uint32_t page_id, val_t event);
 void app_call(const char* export_name); /* on-draw, on-pause, ... */
+/* The system file picker closed: |count| paths (none if cancelled). */
+void app_files_picked(uint32_t request, const char* const* paths,
+                      size_t count);
 
 /* An engine event (JSON, see chorium.h) for a page, on the UI thread. */
 void app_engine_event(uint32_t page_id, const char* json);
@@ -119,6 +123,22 @@ void surface_set_title(const char* utf8, size_t len);
 void surface_copy_text(const char* utf8, size_t len);
 void surface_set_fullscreen(bool on);
 void surface_set_back_enabled(bool on);
+/* chorium.wit's file-chooser-mode, in order. */
+typedef enum {
+  PICKER_OPEN,
+  PICKER_OPEN_MULTIPLE,
+  PICKER_OPEN_FOLDER,
+  PICKER_SAVE,
+} picker_mode_t;
+/* Shows the system file picker; answers later with app_files_picked().
+ * |accept|: MIME types and extensions, |count| of them, none for any. */
+void surface_pick_files(uint32_t request, picker_mode_t mode,
+                        const char* const* accept, size_t count,
+                        const char* default_name);
+/* Opens |path| with its app, or shows it in its folder. */
+void surface_open_file(const char* path, bool in_folder);
+/* The clipboard's text (malloc'd, free() it), or NULL. */
+char* surface_read_clipboard(void);
 /* CSS pixels. False if the system draws the title bar or there is none. */
 bool title_bar_layout(uint32_t* height, uint32_t* buttons_width,
                       bool* maximized);

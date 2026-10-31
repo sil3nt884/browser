@@ -212,6 +212,23 @@ bool field_key(field_t* f, const keypress_t* k, bool* enter) {
     f->selected = f->buf[0] != '\0';
     return true;
   }
+  /* The caret is always at the end, so copy and cut take the whole text
+   * once it's selected. */
+  if (ctrl && (k->code == 'C' || k->code == 'X')) {
+    if (f->selected) {
+      app_string_t s = str(f->buf);
+      umbra_chorium_surface_copy_text(&s);
+      if (k->code == 'X') {
+        f->buf[0] = '\0';
+        f->selected = false;
+      }
+    }
+    return true;
+  }
+  if (ctrl && k->code == 'V') {
+    field_paste(f);
+    return true;
+  }
   switch (k->code) {
     case VK_RETURN:
       f->selected = false;
@@ -242,6 +259,26 @@ bool field_key(field_t* f, const keypress_t* k, bool* enter) {
       return true;
   }
   return false;
+}
+
+void field_paste(field_t* f) {
+  app_string_t clip;
+  umbra_chorium_surface_read_clipboard(&clip);
+  if (f->selected) {
+    f->buf[0] = '\0';
+    f->selected = false;
+  }
+  /* One line: line breaks become spaces, as in Chrome's address bar. */
+  size_t n = strlen(f->buf);
+  for (size_t i = 0; i < clip.len && n + 1 < sizeof f->buf; ++i) {
+    char c = (char)clip.ptr[i];
+    if (c == '\r') {
+      continue;
+    }
+    f->buf[n++] = c == '\n' || c == '\t' ? ' ' : c;
+  }
+  f->buf[n] = '\0';
+  app_string_free(&clip);
 }
 
 void field_text(field_t* f, const app_string_t* s) {

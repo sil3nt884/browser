@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -154,6 +155,22 @@ class HooksTest(unittest.TestCase):
     self.assertEqual(hooks.cmd_apply(self.src, "android", dry_run=True), 0)
     for h in hooks.HOOKS:
       self.assertEqual(snapshot[h.path], read(self.src, h.path))
+
+  def test_custom_packaged_vs_version(self):
+    self.assertEqual(hooks.cmd_apply(self.src, "win", False,
+                                     only="packaged-vs-version"), 0)
+    self.assertNotIn("[umbra] startup",
+                     read(self.src, "chrome/app/chrome_main_delegate.cc"))
+    namespace = {}
+    exec(read(self.src, "build/vs_toolchain.py"), namespace)
+    version = namespace["GetVisualStudioVersion"]
+    with mock.patch.dict(os.environ, {}, clear=True):
+      self.assertEqual(version(), "2026")
+    with mock.patch.dict(os.environ, {"CHORIUM_VS_VERSION": "2022"}):
+      self.assertEqual(version(), "2022")
+    with mock.patch.dict(os.environ, {"CHORIUM_VS_VERSION": "bogus"}):
+      with self.assertRaises(ValueError):
+        version()
 
 
 if __name__ == "__main__":

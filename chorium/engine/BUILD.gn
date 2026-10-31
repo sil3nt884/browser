@@ -22,6 +22,11 @@ declare_args() {
   # "chorium_devtools_remote", for chrome://inspect over adb (only adb and
   # the app itself may connect, as with Chrome). Turn off for releases.
   chorium_android_devtools = true
+
+  # Desktop: Chromium's DevTools on 127.0.0.1, only when the program asks
+  # with chorium_enable_devtools (Chorium.exe: --remote-control, for the
+  # end-to-end tests). Turn off for releases.
+  chorium_desktop_devtools = true
 }
 
 config("chorium_public") {
@@ -33,6 +38,8 @@ source_set("engine") {
     "//umbra/chorium/interfaces/native/chorium.h",
     "src/api.cc",
     "src/browser_context.cc",
+    "src/downloads.cc",
+    "src/downloads.h",
     "src/browser_context.h",
     "src/engine.cc",
     "src/engine.h",
@@ -47,6 +54,7 @@ source_set("engine") {
   deps = [
     ":pak",
     "//base",
+    "//components/download/public/common:public",
     "//components/embedder_support:user_agent",
     "//components/input",
     "//components/viz/host",
@@ -56,6 +64,7 @@ source_set("engine") {
     "//content/public/gpu",
     "//content/public/renderer",
     "//content/public/utility",
+    "//gpu/config",
     "//media",
     "//media/capture/mojom:video_capture_buffer",
     "//mojo/public/cpp/bindings",
@@ -67,6 +76,7 @@ source_set("engine") {
     "//third_party/blink/public:blink_headers",
     "//third_party/blink/public/common",
     "//ui/base",
+    "//ui/compositor",
     "//ui/display",
     "//ui/events",
     "//ui/gfx",
@@ -94,6 +104,9 @@ source_set("engine") {
       "src/window_host.cc",
       "src/window_host.h",
     ]
+    if (chorium_desktop_devtools) {
+      defines += [ "CHORIUM_DESKTOP_DEVTOOLS" ]
+    }
     deps += [
       "//ui/aura",
       "//ui/events/devices",
@@ -102,16 +115,30 @@ source_set("engine") {
 
   if (is_win) {
     deps += [
-      "//content:sandbox_helper_win",
       "//sandbox",
+      "//components/os_crypt/async/browser",
+      "//components/os_crypt/async/browser:dpapi_key_provider",
+      "//components/prefs",
+      "//services/network/public/cpp",
     ]
-    libs = [ "shell32.lib" ]
+    libs = [
+      "ole32.lib",
+      "shell32.lib",
+    ]
   }
 }
 
 if (!is_android) {
   shared_library("chorium") {
     deps = [ ":engine" ]
+    if (is_win) {
+      # Sandboxed page processes have win32k (user32, gdi32...) shut off:
+      # load those only when first used, as chrome.dll does.
+      configs += [
+        "//build/config/win:delayloads",
+        "//build/config/win:delayloads_not_for_child_dll",
+      ]
+    }
     public_configs = [ ":chorium_public" ]
     data_deps = [
       ":pak",

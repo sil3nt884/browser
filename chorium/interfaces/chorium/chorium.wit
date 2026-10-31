@@ -16,7 +16,7 @@
 //     (draw-page); pixels are never copied into Wasm memory.
 //   - The disk. Components only see directories the runtime hands them.
 
-package umbra:chorium@0.3.0;
+package umbra:chorium@0.4.0;
 
 interface types {
   record size {
@@ -96,6 +96,8 @@ interface types {
     focus(bool),
     // Android back button / gesture.
     back,
+    // The system file picker closed (see surface.pick-files).
+    files-picked(files-picked),
   }
 
   enum dialog-kind {
@@ -154,6 +156,25 @@ interface types {
 
   // A long press (touch) or right click on a link, an image or selected
   // text. Text fields keep the system's own menu.
+  // What a text field's menu can do right now.
+  flags edit-flags {
+    cut,
+    copy,
+    paste,
+    select-all,
+    undo,
+    redo,
+  }
+
+  enum edit-command {
+    cut,
+    copy,
+    paste,
+    select-all,
+    undo,
+    redo,
+  }
+
   record context-menu {
     // CSS pixels from the page's top left.
     x: s32,
@@ -163,6 +184,54 @@ interface types {
     link-text: string,
     image-url: string,
     selection: string,
+    // A text field (desktop: Android keeps its own text menu).
+    editable: bool,
+    edit: edit-flags,
+  }
+
+  enum download-state {
+    in-progress,
+    done,
+    failed,
+    cancelled,
+  }
+
+  // A file being saved: the user's Downloads folder, or the system's
+  // Downloads collection on Android.
+  record download {
+    id: u32,
+    file-name: string,
+    // Where it is (or will be); on Android a display path.
+    path: string,
+    url: string,
+    received: u64,
+    // 0 if unknown.
+    total: u64,
+    state: download-state,
+  }
+
+  enum file-chooser-mode {
+    open,
+    open-multiple,
+    open-folder,
+    save,
+  }
+
+  // A page asked for files (<input type=file>, showSaveFilePicker...).
+  // Answer with page.file-chooser-reply, usually after surface.pick-files.
+  record file-chooser {
+    id: u32,
+    mode: file-chooser-mode,
+    // MIME types and extensions (".png", "image/*"), empty for any.
+    accept: list<string>,
+    default-name: string,
+  }
+
+  // The answer to surface.pick-files: paths (Windows) or content:// URIs
+  // (Android); empty if the person cancelled.
+  record files-picked {
+    request: u32,
+    paths: list<string>,
   }
 
   record eval-result {
@@ -190,12 +259,14 @@ interface types {
     frame,
     overscroll(overscroll),
     context-menu(context-menu),
+    download(download),
+    file-chooser(file-chooser),
   }
 }
 
 // Chromium page views, with Tor underneath.
 interface pages {
-  use types.{size, rect, input};
+  use types.{size, rect, input, edit-command};
 
   // Pages' prefers-color-scheme (and form controls, scrollbars): dark or
   // light, for every page. Light until set.
@@ -227,13 +298,23 @@ interface pages {
     // (surface coordinates). Here rather than in `surface` so that importing
     // `surface` doesn't bring in `pages`.
     draw: func(dest: rect);
+
+    // Text-field commands (the context menu's Cut, Copy, Paste...).
+    edit: func(command: edit-command);
+    // Downloads |url| as the page would (Save link / Save image).
+    save-url: func(url: string);
+    // Puts the image at (x, y) on the clipboard.
+    copy-image-at: func(x: s32, y: s32);
+    // Answers a file-chooser event; empty |paths| cancels it.
+    file-chooser-reply: func(id: u32, paths: list<string>);
+    cancel-download: func(id: u32);
   }
 }
 
 // The window (desktop) or screen (Android) to draw into. Drawing is
 // immediate: draw everything for a frame, then present.
 interface surface {
-  use types.{size, rect, color};
+  use types.{size, rect, color, file-chooser-mode};
 
   // Current size in CSS pixels, and the device pixel ratio.
   dimensions: func() -> size;
@@ -262,6 +343,14 @@ interface surface {
   // Android: whether the back gesture goes to the app (as `back` input) or,
   // when there is nothing to go back to, leaves the app. Ignored elsewhere.
   set-back-enabled: func(on: bool);
+  // Opens the system file picker; the answer arrives as a files-picked
+  // input carrying |request|.
+  pick-files: func(request: u32, mode: file-chooser-mode,
+                   accept: list<string>, default-name: string);
+  // Opens a file with its app, or shows it in its folder.
+  open-file: func(path: string, in-folder: bool);
+  // The clipboard's text, empty if none.
+  read-clipboard: func() -> string;
 
   // System icons: Segoe Fluent Icons on Windows, Material Symbols on
   // Android. `close` is the small one for tabs; `close-window`, `minimize`,
@@ -286,6 +375,8 @@ interface surface {
     maximize,
     restore,
     close-window,
+    download,
+    folder,
   }
   // Draws |icon| centred in |r|, sized to fit it.
   draw-icon: func(icon: icon, r: rect, color: color);
@@ -339,6 +430,9 @@ interface net {
   // are closed on every switch.
   set-tor: func(on: bool);
   tor-enabled: func() -> bool;
+  // Clears cookies, local storage, IndexedDB, service workers and site caches.
+  clear-site-data: func();
+  set-clear-site-data-on-close: func(on: bool);
 }
 
 // Files, only inside directories the runtime grants.

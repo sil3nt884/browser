@@ -96,20 +96,28 @@ void overscroll_draw(rect_t page) {
 /* --- the long-press / right-click menu ------------------------------------- */
 
 typedef enum {
+  EDIT_CUT,
+  EDIT_COPY,
+  EDIT_PASTE,
+  EDIT_SELECT_ALL,
   OPEN_LINK,
   COPY_LINK,
   COPY_LINK_TEXT,
+  SAVE_LINK,
   OPEN_IMAGE,
   COPY_IMAGE,
+  COPY_IMAGE_ADDRESS,
+  SAVE_IMAGE,
   COPY_SELECTION,
   SEARCH_SELECTION,
 } action_t;
 
-#define CTX_MAX 7
+#define CTX_MAX 10 /* hit codes HIT_CTX_ITEM .. HIT_CTX_CARD - 1 */
 
 static struct {
   bool open;
-  int x, y; /* where it was asked for, surface pixels */
+  int x, y;           /* where it was asked for, surface pixels */
+  int page_x, page_y; /* the same, page pixels (Copy image) */
   char link[2048], link_text[512], image[2048], selection[2048];
   int count;
   action_t actions[CTX_MAX];
@@ -150,19 +158,33 @@ void context_menu_open(const umbra_browser_browser_context_menu_t* m,
   copy_str(g_ctx.selection, sizeof g_ctx.selection, &m->selection);
   g_ctx.x = page.x + m->x;
   g_ctx.y = page.y + m->y;
+  g_ctx.page_x = m->x;
+  g_ctx.page_y = m->y;
   g_ctx.count = 0;
+  if (m->editable) {
+    /* A text field: only what it can do right now. */
+    if (m->edit & UMBRA_CHORIUM_TYPES_EDIT_FLAGS_CUT) add(EDIT_CUT);
+    if (m->edit & UMBRA_CHORIUM_TYPES_EDIT_FLAGS_COPY) add(EDIT_COPY);
+    if (m->edit & UMBRA_CHORIUM_TYPES_EDIT_FLAGS_PASTE) add(EDIT_PASTE);
+    if (m->edit & UMBRA_CHORIUM_TYPES_EDIT_FLAGS_SELECT_ALL) {
+      add(EDIT_SELECT_ALL);
+    }
+  }
   if (g_ctx.link[0]) {
     add(OPEN_LINK);
     add(COPY_LINK);
     if (g_ctx.link_text[0]) {
       add(COPY_LINK_TEXT);
     }
+    add(SAVE_LINK);
   }
   if (g_ctx.image[0]) {
     add(OPEN_IMAGE);
     add(COPY_IMAGE);
+    add(COPY_IMAGE_ADDRESS);
+    add(SAVE_IMAGE);
   }
-  if (g_ctx.selection[0] && !g_ctx.link[0]) {
+  if (g_ctx.selection[0] && !g_ctx.link[0] && !m->editable) {
     add(COPY_SELECTION);
     add(SEARCH_SELECTION);
     make_search_label();
@@ -174,11 +196,18 @@ void context_menu_open(const umbra_browser_browser_context_menu_t* m,
 
 static const char* label(action_t a) {
   switch (a) {
+    case EDIT_CUT: return "Cut";
+    case EDIT_COPY: return "Copy";
+    case EDIT_PASTE: return "Paste";
+    case EDIT_SELECT_ALL: return "Select all";
     case OPEN_LINK: return "Open in new tab";
     case COPY_LINK: return "Copy link address";
     case COPY_LINK_TEXT: return "Copy link text";
+    case SAVE_LINK: return "Save link as file";
     case OPEN_IMAGE: return "Open image in new tab";
-    case COPY_IMAGE: return "Copy image address";
+    case COPY_IMAGE: return "Copy image";
+    case COPY_IMAGE_ADDRESS: return "Copy image address";
+    case SAVE_IMAGE: return "Save image";
     case COPY_SELECTION: return "Copy";
     case SEARCH_SELECTION: return g_ctx.search_label;
   }
@@ -222,9 +251,10 @@ void context_menu_draw(void) {
              T->shadow);
   fill_round(c, 8, T->card);
   if (g_phone) {
-    const char* title = g_ctx.link[0] ? g_ctx.link : g_ctx.image[0]
-                                                         ? g_ctx.image
-                                                         : g_ctx.selection;
+    const char* title = g_ctx.link[0]      ? g_ctx.link
+                        : g_ctx.image[0]     ? g_ctx.image
+                        : g_ctx.selection[0] ? g_ctx.selection
+                                             : "Text";
     text_in(rect(c.x + 20, c.y + 8, (int)c.width - 40, CTX_TITLE_H - 8),
             title, 13, T->text_dim);
     fill(rect(c.x, c.y + CTX_TITLE_H + 4, (int)c.width, 1), T->separator);
@@ -267,6 +297,38 @@ void context_menu_click(int code) {
     return; /* outside: just close */
   }
   switch (g_ctx.actions[code - HIT_CTX_ITEM]) {
+    case EDIT_CUT:
+      umbra_browser_browser_edit(g_active, UMBRA_CHORIUM_TYPES_EDIT_COMMAND_CUT);
+      break;
+    case EDIT_COPY:
+      umbra_browser_browser_edit(g_active,
+                                 UMBRA_CHORIUM_TYPES_EDIT_COMMAND_COPY);
+      break;
+    case EDIT_PASTE:
+      umbra_browser_browser_edit(g_active,
+                                 UMBRA_CHORIUM_TYPES_EDIT_COMMAND_PASTE);
+      break;
+    case EDIT_SELECT_ALL:
+      umbra_browser_browser_edit(g_active,
+                                 UMBRA_CHORIUM_TYPES_EDIT_COMMAND_SELECT_ALL);
+      break;
+    case SAVE_LINK: {
+      app_string_t url = str(g_ctx.link);
+      umbra_browser_browser_save_url(g_active, &url);
+      break;
+    }
+    case SAVE_IMAGE: {
+      app_string_t url = str(g_ctx.image);
+      umbra_browser_browser_save_url(g_active, &url);
+      break;
+    }
+    case COPY_IMAGE:
+      umbra_browser_browser_copy_image_at(g_active, g_ctx.page_x,
+                                          g_ctx.page_y);
+      break;
+    case COPY_IMAGE_ADDRESS:
+      copy(g_ctx.image);
+      break;
     case OPEN_LINK:
       open_tab_with(g_ctx.link, false);
       break;
@@ -278,9 +340,6 @@ void context_menu_click(int code) {
       break;
     case OPEN_IMAGE:
       open_tab_with(g_ctx.image, false);
-      break;
-    case COPY_IMAGE:
-      copy(g_ctx.image);
       break;
     case COPY_SELECTION:
       copy(g_ctx.selection);

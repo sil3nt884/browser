@@ -55,5 +55,9 @@ if [[ -n "${WIN_TOOLCHAIN_HASH:-}" ]]; then
 fi
 
 gclient sync -D --no-history --nohooks --jobs "$JOBS" --revision "src@$sha"
+if [[ -n ${WIN_TOOLCHAIN_HASH:-} ]]; then
+  python3 /umbra/scripts/hooks.py apply --src "$WORK/src" --platform win \
+    --only packaged-vs-version
+fi
 gclient runhooks
 echo "FETCH DONE $(date -u +%FT%TZ) $(du -sh "$WORK" | cut -f1)"

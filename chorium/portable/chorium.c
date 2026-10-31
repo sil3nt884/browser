@@ -20,10 +20,12 @@
 typedef portable_string_t str_t;
 typedef exports_umbra_browser_browser_tab_info_t tab_info_t;
 typedef exports_umbra_browser_browser_browser_event_t event_t;
+typedef exports_umbra_browser_browser_download_t download_t;
 typedef umbra_chorium_types_size_t size_t2;
 
 #define MAX_TABS 64
 #define MAX_HISTORY 1000
+#define MAX_DOWNLOADS 100
 #define SETTINGS_FILE "settings.txt"
 #define HISTORY_FILE "history.tsv"
 /* The open tabs: "active\t<index>" and then one URL per line, oldest tab
@@ -57,6 +59,14 @@ typedef struct {
 } setting_t;
 
 static tab_t g_tabs[MAX_TABS];
+
+/* This run's downloads, newest first, and the tab each came from. */
+typedef struct {
+  download_t d;
+  uint32_t tab_id;
+} dl_t;
+static dl_t g_downloads[MAX_DOWNLOADS];
+static size_t g_download_count;
 static uint32_t g_next_tab = 1;
 static bool g_ready;
 static umbra_chorium_files_own_dir_t g_dir;
@@ -321,6 +331,9 @@ static void ready(void) {
   g_ready = true;
   g_dir = umbra_chorium_files_app_data();
   load_settings();
+  setting_t* clear = find_setting("clear-site-data-on-close");
+  umbra_chorium_net_set_clear_site_data_on_close(
+      clear && strcmp(clear->value, "true") == 0);
   load_history();
 }
 
@@ -445,6 +458,48 @@ static tab_t* tab_for_page(uint32_t page_id) {
     }
   }
   return NULL;
+}
+
+static str_t copy_str(const str_t* s) {
+  str_t out;
+  out.len = s->len;
+  out.ptr = malloc(s->len ? s->len : 1);
+  if (s->len) {
+    memcpy(out.ptr, s->ptr, s->len);
+  }
+  return out;
+}
+
+static download_t copy_download(const download_t* d) {
+  download_t out = *d;
+  out.file_name = copy_str(&d->file_name);
+  out.path = copy_str(&d->path);
+  out.url = copy_str(&d->url);
+  return out;
+}
+
+static void free_download(download_t* d) {
+  portable_string_free(&d->file_name);
+  portable_string_free(&d->path);
+  portable_string_free(&d->url);
+}
+
+/* Records |d| (new, or news about a known one) from tab |tab_id|. */
+static void track_download(const download_t* d, uint32_t tab_id) {
+  for (size_t i = 0; i < g_download_count; ++i) {
+    if (g_downloads[i].d.id == d->id) {
+      free_download(&g_downloads[i].d);
+      g_downloads[i].d = copy_download(d);
+      return;
+    }
+  }
+  if (g_download_count == MAX_DOWNLOADS) {
+    free_download(&g_downloads[--g_download_count].d);
+  }
+  memmove(&g_downloads[1], &g_downloads[0], sizeof(dl_t) * g_download_count);
+  g_downloads[0].d = copy_download(d);
+  g_downloads[0].tab_id = tab_id;
+  ++g_download_count;
 }
 
 static umbra_chorium_pages_borrow_page_t page(tab_t* t) {
@@ -607,6 +662,72 @@ void exports_umbra_browser_browser_set_active_tab(
   if (g_active_tab != id) {
     g_active_tab = id;
     save_session();
+  }
+}
+
+void exports_umbra_browser_browser_edit(
+    exports_umbra_browser_browser_tab_id_t id,
+    umbra_chorium_types_edit_command_t command) {
+  tab_t* t = tab(id);
+  if (t) {
+    umbra_chorium_pages_method_page_edit(page(t), command);
+  }
+}
+
+void exports_umbra_browser_browser_save_url(
+    exports_umbra_browser_browser_tab_id_t id, str_t* url) {
+  tab_t* t = tab(id);
+  if (t) {
+    umbra_chorium_pages_method_page_save_url(page(t), url);
+  }
+  portable_string_free(url);
+}
+
+void exports_umbra_browser_browser_copy_image_at(
+    exports_umbra_browser_browser_tab_id_t id, int32_t x, int32_t y) {
+  tab_t* t = tab(id);
+  if (t) {
+    umbra_chorium_pages_method_page_copy_image_at(page(t), x, y);
+  }
+}
+
+void exports_umbra_browser_browser_file_chooser_reply(
+    exports_umbra_browser_browser_tab_id_t id, uint32_t chooser,
+    portable_list_string_t* paths) {
+  tab_t* t = tab(id);
+  if (t) {
+    umbra_chorium_pages_method_page_file_chooser_reply(page(t), chooser,
+                                                       paths);
+  }
+  portable_list_string_free(paths);
+}
+
+void exports_umbra_browser_browser_downloads(
+    exports_umbra_browser_browser_list_download_t* ret) {
+  ret->len = g_download_count;
+  ret->ptr = g_download_count ? malloc(sizeof(download_t) * g_download_count)
+                              : NULL;
+  for (size_t i = 0; i < g_download_count; ++i) {
+    ret->ptr[i] = copy_download(&g_downloads[i].d);
+  }
+}
+
+void exports_umbra_browser_browser_cancel_download(uint32_t id) {
+  /* The engine's downloads are global: any page can cancel one, but the
+   * one it came from is the natural choice. */
+  tab_t* t = NULL;
+  for (size_t i = 0; i < g_download_count; ++i) {
+    if (g_downloads[i].d.id == id) {
+      t = tab(g_downloads[i].tab_id);
+    }
+  }
+  for (int i = 0; !t && i < MAX_TABS; ++i) {
+    if (g_tabs[i].used) {
+      t = &g_tabs[i];
+    }
+  }
+  if (t) {
+    umbra_chorium_pages_method_page_cancel_download(page(t), id);
   }
 }
 
@@ -868,6 +989,19 @@ void exports_umbra_browser_browser_handle_page_event(
       memset(&ev->val.context_menu, 0, sizeof ev->val.context_menu);
       add_event(ret, e);
       break;
+    case UMBRA_CHORIUM_TYPES_PAGE_EVENT_DOWNLOAD:
+      track_download(&ev->val.download, t->id);
+      e.tag = EXPORTS_UMBRA_BROWSER_BROWSER_BROWSER_EVENT_DOWNLOAD;
+      e.val.download = copy_download(&ev->val.download);
+      add_event(ret, e);
+      break;
+    case UMBRA_CHORIUM_TYPES_PAGE_EVENT_FILE_CHOOSER:
+      e.tag = EXPORTS_UMBRA_BROWSER_BROWSER_BROWSER_EVENT_FILE_CHOOSER;
+      e.val.file_chooser.f0 = t->id;
+      e.val.file_chooser.f1 = ev->val.file_chooser;
+      memset(&ev->val.file_chooser, 0, sizeof ev->val.file_chooser);
+      add_event(ret, e);
+      break;
     default:
       /* eval-result: nothing in the browser interface yet. */
       break;
@@ -917,6 +1051,10 @@ void exports_umbra_browser_browser_clear_history(void) {
   }
 }
 
+void exports_umbra_browser_browser_clear_site_data(void) {
+  umbra_chorium_net_clear_site_data();
+}
+
 bool exports_umbra_browser_browser_get_setting(str_t* key, str_t* ret) {
   ready();
   char* k = take_str(key);
@@ -936,6 +1074,9 @@ void exports_umbra_browser_browser_set_setting(str_t* key, str_t* value) {
   if (k[0] && !strchr(k, '=')) {
     put_setting(k, v);
     save_settings();
+    if (strcmp(k, "clear-site-data-on-close") == 0) {
+      umbra_chorium_net_set_clear_site_data_on_close(strcmp(v, "true") == 0);
+    }
   }
   free(k);
   free(v);

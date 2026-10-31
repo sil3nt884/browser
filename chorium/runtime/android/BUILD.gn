@@ -36,6 +36,7 @@ generate_jni("runtime_jni") {
   sources = [
     "java/src/org/umbra/chorium/runtime/AppView.java",
     "java/src/org/umbra/chorium/runtime/ChoriumNatives.java",
+    "java/src/org/umbra/chorium/runtime/RemoteControl.java",
   ]
 }
 
@@ -46,6 +47,8 @@ source_set("runtime_core") {
     "../common/contract.c",
     "../common/events.c",
     "../common/json.c",
+    "../common/remote.c",
+    "../common/remote.h",
     "../common/runtime.h",
     "../common/vals.c",
   ]
@@ -95,6 +98,7 @@ android_library("runtime_java") {
     "java/src/org/umbra/chorium/runtime/ChoriumActivity.java",
     "java/src/org/umbra/chorium/runtime/ChoriumApplication.java",
     "java/src/org/umbra/chorium/runtime/ChoriumNatives.java",
+    "java/src/org/umbra/chorium/runtime/RemoteControl.java",
   ]
   srcjar_deps = [ ":runtime_jni" ]
   deps = [

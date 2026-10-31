@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #endif
 
+#include "remote.h"
 #include "runtime.h"
 
 /* Portable C shared with MSVC builds, not Chromium code: Chromium's C++
@@ -30,7 +31,7 @@
 #endif
 
 #define PKG "umbra:chorium/"
-#define VER "@0.3.0"
+#define VER "@0.4.0"
 
 /* Host resource type tags. */
 #define TY_PAGE 1
@@ -386,6 +387,8 @@ HOSTFN(surface_fill_round_rect_fn) {
 HOSTFN(surface_draw_text_fn) {
   surface_draw_text(args[0].of.s32, args[1].of.s32, args[2].of.string.data,
                     args[2].of.string.size, args[3].of.f32, args[4].of.u32);
+  remote_text(args[0].of.s32, args[1].of.s32, args[2].of.string.data,
+              args[2].of.string.size, args[3].of.f32);
   return NULL;
 }
 
@@ -407,26 +410,81 @@ HOSTFN(pages_set_dark_mode) {
 HOSTFN(page_draw) {
   PAGE_ARG();
   surface_draw_page(page_id, RECT_ARGS(&args[1]));
+  remote_page(page_id, RECT_ARGS(&args[1]));
   return NULL;
 }
 
 HOSTFN(surface_push_clip_fn) {
   surface_push_clip(RECT_ARGS(&args[0]));
+  remote_clip(RECT_ARGS(&args[0]));
   return NULL;
 }
 
 HOSTFN(surface_pop_clip_fn) {
   surface_pop_clip();
+  remote_unclip();
   return NULL;
 }
 
 HOSTFN(surface_present_fn) {
   surface_present();
+  remote_present();
+  return NULL;
+}
+
+static const char* const kEditCommands[] = {"cut",        "copy", "paste",
+                                            "select-all", "undo", "redo"};
+
+HOSTFN(page_edit) {
+  PAGE_ARG();
+  for (int i = 0; i < (int)(sizeof kEditCommands / sizeof kEditCommands[0]);
+       ++i) {
+    if (r_name_is(&args[1].of.enumeration, kEditCommands[i])) {
+      chorium_edit(page->view, i); /* CHORIUM_EDIT_* in the same order */
+    }
+  }
+  return NULL;
+}
+
+HOSTFN(page_save_url) {
+  PAGE_ARG();
+  char* url = r_cstring(&args[1]);
+  chorium_save_url(page->view, url);
+  free(url);
+  return NULL;
+}
+
+HOSTFN(page_copy_image_at) {
+  PAGE_ARG();
+  chorium_copy_image_at(page->view, args[1].of.s32, args[2].of.s32);
+  return NULL;
+}
+
+HOSTFN(page_file_chooser_reply) {
+  PAGE_ARG();
+  const wasmtime_component_vallist_t* list = &args[2].of.list;
+  char** paths = malloc(sizeof(char*) * (list->size ? list->size : 1));
+  for (size_t i = 0; i < list->size; ++i) {
+    paths[i] = r_cstring(&list->data[i]);
+  }
+  chorium_file_chooser_reply(page->view, (int)args[1].of.u32,
+                             (const char* const*)paths, (int)list->size);
+  for (size_t i = 0; i < list->size; ++i) {
+    free(paths[i]);
+  }
+  free(paths);
+  return NULL;
+}
+
+HOSTFN(page_cancel_download) {
+  PAGE_ARG();
+  chorium_cancel_download((int)args[1].of.u32);
   return NULL;
 }
 
 HOSTFN(surface_show_keyboard_fn) {
   surface_show_keyboard(args[0].of.boolean);
+  remote_keyboard(args[0].of.boolean);
   return NULL;
 }
 
@@ -434,7 +492,8 @@ static const char* const kIcons[] = {
     "back",     "forward",  "reload",   "stop",    "close",
     "add",      "menu",     "search",   "lock",    "info",
     "page",     "settings", "history",  "home",    "check",
-    "minimize", "maximize", "restore",  "close-window",
+    "minimize", "maximize", "restore",  "close-window", "download",
+    "folder",
 };
 
 HOSTFN(surface_draw_icon_fn) {
@@ -445,6 +504,7 @@ HOSTFN(surface_draw_icon_fn) {
     }
   }
   surface_draw_icon(icon, RECT_ARGS(&args[1]), args[2].of.u32);
+  remote_icon(icon, RECT_ARGS(&args[1]));
   return NULL;
 }
 
@@ -484,6 +544,7 @@ HOSTFN(surface_set_drag_areas_fn) {
 
 HOSTFN(surface_set_title_fn) {
   surface_set_title(args[0].of.string.data, args[0].of.string.size);
+  remote_title(args[0].of.string.data, args[0].of.string.size);
   return NULL;
 }
 
@@ -494,6 +555,7 @@ HOSTFN(surface_copy_text_fn) {
 
 HOSTFN(surface_set_fullscreen_fn) {
   surface_set_fullscreen(args[0].of.boolean);
+  remote_fullscreen(args[0].of.boolean);
   return NULL;
 }
 
@@ -502,7 +564,74 @@ HOSTFN(surface_set_back_enabled_fn) {
   return NULL;
 }
 
+static const char* const kChooserModes[] = {"open", "open-multiple",
+                                            "open-folder", "save"};
+
+HOSTFN(surface_pick_files_fn) {
+  int mode = 0;
+  for (int i = 0; i < 4; ++i) {
+    if (r_name_is(&args[1].of.enumeration, kChooserModes[i])) {
+      mode = i;
+    }
+  }
+  const wasmtime_component_vallist_t* list = &args[2].of.list;
+  char** accept = malloc(sizeof(char*) * (list->size ? list->size : 1));
+  for (size_t i = 0; i < list->size; ++i) {
+    accept[i] = r_cstring(&list->data[i]);
+  }
+  char* default_name = r_cstring(&args[3]);
+  remote_picker(args[0].of.u32, mode, (const char* const*)accept, list->size);
+  surface_pick_files(args[0].of.u32, (picker_mode_t)mode,
+                     (const char* const*)accept, list->size, default_name);
+  free(default_name);
+  for (size_t i = 0; i < list->size; ++i) {
+    free(accept[i]);
+  }
+  free(accept);
+  return NULL;
+}
+
+HOSTFN(surface_open_file_fn) {
+  char* path = r_cstring(&args[0]);
+  if (!remote_open_file(path, args[1].of.boolean)) {
+    surface_open_file(path, args[1].of.boolean);
+  }
+  free(path);
+  return NULL;
+}
+
+HOSTFN(surface_read_clipboard_fn) {
+  char* text = surface_read_clipboard();
+  results[0] = v_cstring(text ? text : "");
+  free(text);
+  return NULL;
+}
+
+void app_files_picked(uint32_t request, const char* const* paths,
+                      size_t count) {
+  remote_picker_closed();
+  static const char* const names[] = {"request", "paths"};
+  val_t* items = malloc(sizeof(val_t) * (count ? count : 1));
+  for (size_t i = 0; i < count; ++i) {
+    items[i] = v_cstring(paths[i]);
+  }
+  val_t fields[] = {v_u32(request), v_list(count, items)};
+  free(items);
+  val_t picked = v_record(2, names, fields);
+  app_input(v_variant("files-picked", &picked));
+}
+
 /* --- net ---------------------------------------------------------------- */
+
+HOSTFN(net_clear_site_data_fn) {
+  chorium_clear_site_data();
+  return NULL;
+}
+
+HOSTFN(net_set_clear_site_data_on_close_fn) {
+  chorium_set_clear_site_data_on_close(args[0].of.boolean);
+  return NULL;
+}
 
 HOSTFN(net_fetch_fn) {
   /* TODO(chorium): route through chorium.dll's network service (Tor). */
@@ -782,6 +911,11 @@ static bool define_imports(void) {
       {"[method]page.eval", page_eval},
       {"[method]page.dialog-reply", page_dialog_reply},
       {"[method]page.draw", page_draw},
+      {"[method]page.edit", page_edit},
+      {"[method]page.save-url", page_save_url},
+      {"[method]page.copy-image-at", page_copy_image_at},
+      {"[method]page.file-chooser-reply", page_file_chooser_reply},
+      {"[method]page.cancel-download", page_cancel_download},
   };
   static const func_def surface[] = {
       {"dimensions", surface_dimensions_fn},
@@ -800,6 +934,9 @@ static bool define_imports(void) {
       {"copy-text", surface_copy_text_fn},
       {"set-fullscreen", surface_set_fullscreen_fn},
       {"set-back-enabled", surface_set_back_enabled_fn},
+      {"pick-files", surface_pick_files_fn},
+      {"open-file", surface_open_file_fn},
+      {"read-clipboard", surface_read_clipboard_fn},
       {"draw-icon", surface_draw_icon_fn},
       {"dark-mode", surface_dark_mode_fn},
       {"title-bar-layout", surface_title_bar_layout_fn},
@@ -810,6 +947,8 @@ static bool define_imports(void) {
       {"tor-progress", net_tor_progress_fn},
       {"set-tor", net_set_tor_fn},
       {"tor-enabled", net_tor_enabled_fn},
+      {"clear-site-data", net_clear_site_data_fn},
+      {"set-clear-site-data-on-close", net_set_clear_site_data_on_close_fn},
   };
   static const func_def files[] = {
       {"app-data", files_app_data_fn},

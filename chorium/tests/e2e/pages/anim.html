@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E2E animation</title>
+<div id="box" style="width:80px;height:80px;background:#4285f4;position:relative"></div>
+<script>
+  // Moves every frame; the tests count frames per second.
+  window.frames_drawn = 0;
+  function tick(t) {
+    window.frames_drawn++;
+    document.getElementById('box').style.left = (t / 4 % 300) + 'px';
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+  window.measure = (ms) => new Promise((done) => {
+    const start = window.frames_drawn;
+    setTimeout(() => done((window.frames_drawn - start) * 1000 / ms), ms);
+  });
+</script>

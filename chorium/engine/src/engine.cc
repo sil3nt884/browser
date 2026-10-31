@@ -18,13 +18,19 @@
 #include "base/functional/callback_helpers.h"
 #include "base/strings/string_util.h"
 #include "components/embedder_support/user_agent_utils.h"
+#include "gpu/config/gpu_switches.h"
 #include "net/proxy_resolution/proxy_config.h"
 #include "net/proxy_resolution/proxy_config_with_annotation.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "content/public/browser/storage_partition.h"
 #include "services/network/public/cpp/network_switches.h"
 #include "services/network/public/mojom/network_context.mojom.h"
+#include "services/network/public/cpp/transferable_directory.h"
+#if BUILDFLAG(IS_WIN)
+#include "services/network/public/cpp/cookie_encryption_provider_impl.h"
+#endif
 #include "third_party/blink/public/common/web_preferences/web_preferences.h"
+#include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "third_party/blink/public/mojom/css/preferred_color_scheme.mojom-shared.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
@@ -55,13 +61,25 @@
 #include "content/public/common/result_codes.h"
 #include "net/android/network_change_notifier_factory_android.h"
 #include "content/public/browser/android/devtools_auth.h"
-#include "content/public/browser/devtools_agent_host.h"
-#include "content/public/browser/devtools_manager_delegate.h"
-#include "content/public/browser/devtools_socket_factory.h"
 #include "net/base/net_errors.h"
 #include "net/socket/unix_domain_server_socket_posix.h"
 #include "content/public/browser/posix_file_descriptor_info.h"
 #include "content/public/common/content_descriptors.h"
+#endif
+
+#if BUILDFLAG(IS_WIN)
+#include "content/child/font_warmup_win.h"
+#endif
+
+#if defined(CHORIUM_ANDROID_DEVTOOLS) || defined(CHORIUM_DESKTOP_DEVTOOLS)
+#include "content/public/browser/devtools_agent_host.h"
+#include "content/public/browser/devtools_manager_delegate.h"
+#include "content/public/browser/devtools_socket_factory.h"
+#include "net/base/net_errors.h"
+#endif
+#if defined(CHORIUM_DESKTOP_DEVTOOLS)
+#include "net/log/net_log_source.h"
+#include "net/socket/tcp_server_socket.h"
 #endif
 
 namespace chorium {
@@ -71,6 +89,33 @@ namespace {
 #if BUILDFLAG(IS_ANDROID)
 // Where child processes find chorium.pak (see PreSandboxStartup).
 constexpr int kChoriumPakDescriptor = kContentIPCDescriptorMax + 1;
+#endif
+
+#if defined(CHORIUM_DESKTOP_DEVTOOLS)
+// DevTools on a loopback port (chorium_enable_devtools), as content shell's
+// --remote-debugging-port.
+class TcpDevToolsSocketFactory : public content::DevToolsSocketFactory {
+ public:
+  explicit TcpDevToolsSocketFactory(int port) : port_(port) {}
+
+ private:
+  std::unique_ptr<net::ServerSocket> CreateForHttpServer() override {
+    auto socket =
+        std::make_unique<net::TCPServerSocket>(nullptr, net::NetLogSource());
+    if (socket->ListenWithAddressAndPort("127.0.0.1", port_, /*backlog=*/5) !=
+        net::OK) {
+      return nullptr;
+    }
+    return socket;
+  }
+
+  std::unique_ptr<net::ServerSocket> CreateForTethering(
+      std::string* name) override {
+    return nullptr;
+  }
+
+  const int port_;
+};
 #endif
 
 #if defined(CHORIUM_ANDROID_DEVTOOLS)
@@ -211,6 +256,16 @@ void SetTor(bool on) {
       }));
 }
 
+void ClearSiteData(base::OnceClosure done) {
+  if (auto* context = State().context.get()) {
+    context->GetDefaultStoragePartition()->ClearData(
+        content::StoragePartition::REMOVE_DATA_MASK_ALL, blink::StorageKey(),
+        base::Time(), base::Time::Max(), std::move(done));
+  } else {
+    std::move(done).Run();
+  }
+}
+
 std::string TorProxy() {
   // umbra::OnBasicStartupComplete() records the Tor port here (or the dead
   // port if Tor failed). Chorium owns this process's command line, so nothing
@@ -293,6 +348,13 @@ int BrowserMainParts::PreMainMessageLoopRun() {
       std::make_unique<AdbDevToolsSocketFactory>(), base::FilePath(),
       base::FilePath());
 #endif
+#if defined(CHORIUM_DESKTOP_DEVTOOLS)
+  if (State().devtools_port > 0) {
+    content::DevToolsAgentHost::StartRemoteDebuggingServer(
+        std::make_unique<TcpDevToolsSocketFactory>(State().devtools_port),
+        base::FilePath(), base::FilePath());
+  }
+#endif
   return 0;
 }
 
@@ -331,6 +393,27 @@ void BrowserClient::ConfigureNetworkContextParams(
       context, in_memory, relative_partition_path, network_context_params,
       cert_verifier_creation_params);
 
+  // Persist site data independently of the HTTP cache. An absent cache
+  // directory means Chromium uses an in-memory cache.
+  auto& params = *network_context_params;
+  params.http_cache_enabled = true;
+  if (!in_memory && !context->IsOffTheRecord()) {
+    params.file_paths = network::mojom::NetworkContextFilePaths::New();
+    params.file_paths->data_directory = network::TransferableDirectory(
+        context->GetPath().Append(relative_partition_path).AppendASCII("Network"));
+    params.file_paths->cookie_database_name = base::FilePath(FILE_PATH_LITERAL("Cookies"));
+    params.persist_session_cookies = true;
+    params.restore_old_session_cookies = true;
+#if BUILDFLAG(IS_WIN)
+    params.cookie_encryption_provider =
+        static_cast<BrowserContext*>(context)->cookie_encryption()->BindNewRemote();
+    params.enable_encrypted_cookies = true;
+#else
+    // Android protects this directory with the app's private UID/storage.
+    params.enable_encrypted_cookies = false;
+#endif
+  }
+
   // The kill switch, set in code for every network context: one SOCKS5
   // proxy, no DIRECT fallback, no bypass (not even for localhost). SOCKS5
   // sends host names, so DNS is resolved by the Tor exit. If the proxy is
@@ -345,6 +428,13 @@ void BrowserClient::ConfigureNetworkContextParams(
 // The same user agent and client hints as a stock Chrome of this version.
 std::string BrowserClient::GetUserAgent() {
   return embedder_support::GetUserAgent();
+}
+
+bool BrowserClient::AllowCompressionDictionaryTransport(
+    content::BrowserContext* context) {
+  // Content otherwise adds a persistent Shared Dictionary cache behind our
+  // RAM-only HTTP cache. Sites retain normal gzip/Brotli transport support.
+  return false;
 }
 
 blink::UserAgentMetadata BrowserClient::GetUserAgentMetadata() {
@@ -363,7 +453,7 @@ void BrowserClient::OverrideWebPreferences(
   prefs->preferred_root_scrollbar_color_scheme = scheme;
 }
 
-#if defined(CHORIUM_ANDROID_DEVTOOLS)
+#if defined(CHORIUM_ANDROID_DEVTOOLS) || defined(CHORIUM_DESKTOP_DEVTOOLS)
 std::unique_ptr<content::DevToolsManagerDelegate>
 BrowserClient::CreateDevToolsManagerDelegate() {
   return std::make_unique<content::DevToolsManagerDelegate>();
@@ -405,6 +495,8 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
   // Browser process only: starts Tor (Arti) and records its SOCKS port, or
   // the dead port if it failed. Shared with the Umbra browser.
   umbra::OnBasicStartupComplete();
+  base::CommandLine::ForCurrentProcess()->AppendSwitch(
+      switches::kDisableGpuShaderDiskCache);
   // Umbra also makes every local DNS lookup fail. The network service reads
   // that once at start, and with the Tor switch off pages need DNS, so
   // Chorium goes without it. With Tor on, names are still resolved by the
@@ -434,6 +526,14 @@ std::variant<int, content::MainFunctionParams> MainDelegate::RunProcess(
 #endif
 
 void MainDelegate::PreSandboxStartup() {
+#if BUILDFLAG(IS_WIN)
+  if (base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("type") ==
+      "renderer") {
+    // DirectWrite must not try to contact the system font-cache service
+    // after token lockdown. FontDataService supplies font bytes instead.
+    content::PatchServiceManagerCalls();
+  }
+#endif
 #if BUILDFLAG(IS_ANDROID)
   // chorium.pak is an APK asset. Child processes can't open the APK (another
   // UID), so the browser passes them the file (see BrowserClient).

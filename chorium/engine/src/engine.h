@@ -11,6 +11,7 @@
 #include <variant>
 #include <vector>
 
+#include "base/files/file_path.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
@@ -56,6 +57,17 @@ struct EngineState {
   std::vector<mojo::Remote<network::mojom::ProxyConfigClient>> proxy_clients;
   // Stops and starts Tor off the engine thread, one at a time.
   scoped_refptr<base::SequencedTaskRunner> tor_runner;
+  // How often pages draw (chorium_set_frame_rate). Engine thread.
+  int frame_hz = 60;
+  // chorium_set_download_dir; empty for the user's Downloads folder. Engine
+  // thread.
+  base::FilePath download_dir;
+  // chorium_enable_devtools: a loopback port, or 0 for none. Set before the
+  // engine starts.
+  int devtools_port = 0;
+  // Set before startup; empty preserves the embeddable engine's private mode.
+  base::FilePath profile_dir;
+  bool clear_site_data_on_close = false;
 };
 
 EngineState& State();
@@ -65,6 +77,7 @@ void PostToEngine(base::OnceClosure task);
 
 // The Tor switch (see chorium_set_tor). Engine thread.
 void SetTor(bool on);
+void ClearSiteData(base::OnceClosure done);
 
 // The Tor proxy every network context must use, e.g. "socks5://127.0.0.1:N".
 // Points at a dead loopback port if Tor did not start (fail closed).
@@ -111,11 +124,13 @@ class BrowserClient : public content::ContentBrowserClient {
       cert_verifier::mojom::CertVerifierCreationParams*
           cert_verifier_creation_params) override;
   std::string GetUserAgent() override;
+  bool AllowCompressionDictionaryTransport(
+      content::BrowserContext* context) override;
   blink::UserAgentMetadata GetUserAgentMetadata() override;
   void OverrideWebPreferences(content::WebContents* web_contents,
                               content::SiteInstance& main_frame_site,
                               blink::web_pref::WebPreferences* prefs) override;
-#if defined(CHORIUM_ANDROID_DEVTOOLS)
+#if defined(CHORIUM_ANDROID_DEVTOOLS) || defined(CHORIUM_DESKTOP_DEVTOOLS)
   // The DevTools server (engine.cc) needs one; the defaults do.
   std::unique_ptr<content::DevToolsManagerDelegate>
   CreateDevToolsManagerDelegate() override;

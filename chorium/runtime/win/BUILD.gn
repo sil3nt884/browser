@@ -1,0 +1,124 @@
+# Copyright 2026 The Umbra Authors.
+#
+# Chorium.exe, the Windows runtime, next to chorium.dll. Built with
+# Chromium's toolchain because Chromium's sandbox has to be linked into the
+# .exe (see sandbox_win.cc).
+#
+#   docker ... chorium-build:157 bash /umbra/chorium/docker/build.sh win
+#   -> out/chorium-win/Chorium.exe, chorium.dll, chorium_test.exe
+
+import("//build/config/win/manifest.gni")
+
+declare_args() {
+  # Wasmtime's C API for Windows (bytecodealliance/wasmtime releases).
+  chorium_wasmtime_win_dir =
+      "/work/wasm-tools/wasmtime-v50.0.1-x86_64-windows-c-api"
+}
+
+group("win") {
+  deps = [
+    ":Chorium",
+    "//umbra/chorium/engine:chorium_test",
+  ]
+}
+
+config("wasmtime") {
+  # -imsvc: Wasmtime's headers aren't held to Chromium's warning flags.
+  cflags = [ "-imsvc$chorium_wasmtime_win_dir/include" ]
+}
+
+# Plain C and Win32 code, also built by MSVC once: Chromium's own style
+# checks (raw_ptr, its stricter warnings) don't apply.
+config("runtime_code") {
+  include_dirs = [
+    "../common",
+    "//umbra/chorium/interfaces/native",
+  ]
+  defines = [
+    "UNICODE",
+    "_UNICODE",
+    "_CRT_SECURE_NO_WARNINGS",
+  ]
+}
+
+source_set("runtime_core") {
+  sources = [
+    "../common/contract.c",
+    "../common/events.c",
+    "../common/json.c",
+    "../common/remote.c",
+    "../common/remote.h",
+    "../common/runtime.h",
+    "../common/vals.c",
+  ]
+  libs = [ "ws2_32.lib" ]
+  configs += [
+    ":runtime_code",
+    ":wasmtime",
+  ]
+  configs -= [
+    "//build/config/clang:find_bad_constructs",
+    "//build/config/compiler:chromium_code",
+  ]
+  configs += [ "//build/config/compiler:no_chromium_code" ]
+  deps = [ "//umbra/chorium/engine:chorium" ]
+}
+
+windows_manifest("manifest") {
+  sources = [ "host.manifest" ]
+}
+
+executable("Chorium") {
+  sources = [
+    "files_win.cpp",
+    "host.h",
+    "loader.c",
+    "main.c",
+    "platform_win.c",
+    "remote_win.c",
+    "sandbox_win.cc",
+    "surface_d2d.cpp",
+  ]
+  configs += [
+    ":runtime_code",
+    ":wasmtime",
+    "//build/config/win:windowed",
+
+    # Page processes are this .exe too, and the sandbox shuts win32k (all of
+    # user32, gdi32...) off for them: nothing may load those DLLs at start.
+    "//build/config/win:delayloads",
+  ]
+  configs -= [
+    "//build/config/clang:find_bad_constructs",
+    "//build/config/compiler:chromium_code",
+    "//build/config/win:console",
+  ]
+  configs += [ "//build/config/compiler:no_chromium_code" ]
+  deps = [
+    ":manifest",
+    ":runtime_core",
+    "//sandbox/win:sandbox",
+    "//umbra/chorium/engine:chorium",
+  ]
+  lib_dirs = [ "$chorium_wasmtime_win_dir/lib" ]
+  libs = [
+    "wasmtime.dll.lib",
+    "comctl32.lib",
+    "d2d1.lib",
+    "dwrite.lib",
+    "gdi32.lib",
+    "ole32.lib",
+    "shell32.lib",
+    "user32.lib",
+  ]
+  ldflags = [
+    "/ENTRY:mainCRTStartup",
+
+    # Same stack size as chrome.exe.
+    "/STACK:0x800000",
+    "/DELAYLOAD:d2d1.dll",
+    "/DELAYLOAD:dwrite.dll",
+    "/DELAYLOAD:wasmtime.dll",
+  ]
+  data = [ "$chorium_wasmtime_win_dir/lib/wasmtime.dll" ]
+}

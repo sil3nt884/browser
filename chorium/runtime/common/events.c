@@ -141,18 +141,99 @@ static bool page_event_from_json(const char* json, val_t* out) {
     free(kind_s);
     free(phase_s);
   } else if (strcmp(type, "context_menu") == 0) {
-    static const char* const names[] = {"x", "y", "link-url", "link-text",
-                                        "image-url", "selection"};
+    static const char* const names[] = {"x",         "y",         "link-url",
+                                        "link-text", "image-url", "selection",
+                                        "editable",  "edit"};
+    /* chorium.h's "edit" bits, in edit-flags order. */
+    static const char* const edit[] = {"cut",        "copy", "paste",
+                                       "select-all", "undo", "redo"};
     long long x = 0, y = 0;
     json_int(json, "x", &x);
     json_int(json, "y", &y);
-    val_t fields[] = {v_s32((int32_t)x), v_s32((int32_t)y),
+    val_t fields[] = {v_s32((int32_t)x),
+                      v_s32((int32_t)y),
                       string_field(json, "link_url"),
                       string_field(json, "link_text"),
                       string_field(json, "image_url"),
-                      string_field(json, "selection")};
-    payload = v_record(6, names, fields);
+                      string_field(json, "selection"),
+                      v_bool(bool_field(json, "editable")),
+                      v_flags(edit, 6, u32_field(json, "edit"))};
+    payload = v_record(8, names, fields);
     *out = v_variant("context-menu", &payload);
+  } else if (strcmp(type, "download") == 0) {
+    static const char* const states[] = {"in_progress", "done", "failed",
+                                         "cancelled"};
+    static const char* const wit_states[] = {"in-progress", "done", "failed",
+                                             "cancelled"};
+    static const char* const names[] = {"id",       "file-name", "path", "url",
+                                        "received", "total",     "state"};
+    char* state_s;
+    const char* state = enum_field(json, "state", states, 4, &state_s);
+    ok = state != NULL;
+    if (ok) {
+      size_t s = 0;
+      while (strcmp(states[s], state) != 0) {
+        ++s;
+      }
+      long long received = 0, total = 0;
+      json_int(json, "received", &received);
+      json_int(json, "total", &total);
+      val_t fields[] = {v_u32(u32_field(json, "id")),
+                        string_field(json, "file_name"),
+                        string_field(json, "path"),
+                        string_field(json, "url"),
+                        v_u64((uint64_t)received),
+                        v_u64((uint64_t)total),
+                        v_enum(wit_states[s])};
+      payload = v_record(7, names, fields);
+      *out = v_variant("download", &payload);
+    }
+    free(state_s);
+  } else if (strcmp(type, "file_chooser") == 0) {
+    static const char* const modes[] = {"open", "open_multiple", "open_folder",
+                                        "save"};
+    static const char* const wit_modes[] = {"open", "open-multiple",
+                                            "open-folder", "save"};
+    static const char* const names[] = {"id", "mode", "accept",
+                                        "default-name"};
+    char* mode_s;
+    const char* mode = enum_field(json, "mode", modes, 4, &mode_s);
+    ok = mode != NULL;
+    if (ok) {
+      size_t m = 0;
+      while (strcmp(modes[m], mode) != 0) {
+        ++m;
+      }
+      /* "accept" is one string, the types separated by newlines. */
+      char* accept = NULL;
+      json_string(json, "accept", &accept);
+      size_t count = 0;
+      val_t* items = NULL;
+      if (accept && accept[0]) {
+        count = 1;
+        for (const char* c = accept; *c; ++c) {
+          count += *c == '\n';
+        }
+        items = malloc(sizeof(val_t) * count);
+        size_t i = 0;
+        for (char *start = accept, *nl;; start = nl + 1) {
+          nl = strchr(start, '\n');
+          size_t len = nl ? (size_t)(nl - start) : strlen(start);
+          items[i++] = v_string(start, len);
+          if (!nl) {
+            break;
+          }
+        }
+      }
+      free(accept);
+      val_t fields[] = {v_u32(u32_field(json, "id")), v_enum(wit_modes[m]),
+                        v_list(count, items),
+                        string_field(json, "default_name")};
+      free(items);
+      payload = v_record(4, names, fields);
+      *out = v_variant("file-chooser", &payload);
+    }
+    free(mode_s);
   } else {
     ok = false;
   }

@@ -28,7 +28,8 @@ TARGET=${1:-win}
 shift || true
 case $TARGET in
   win)
-    ROOT_TARGET=//umbra/chorium/engine:chorium_test
+    # Chorium.exe (with Chromium's sandbox), chorium.dll, chorium_test.exe.
+    ROOT_TARGET=//umbra/chorium/runtime/win:win
     CPU=${CPU:-x64}
     ;;
   android)
@@ -63,9 +64,15 @@ if [[ ! -L $SRC/umbra ]]; then
 fi
 
 mkdir -p "$SRC/$OUT"
-# One build at a time per volume, so a lock left by a stopped container is
-# stale; autoninja refuses to start (exit 247) while it exists.
+# Do not remove another live build's ninja lock. flock is released even
+# after a killed container; the lock file itself can safely remain.
+exec 9>"$SRC/.chorium-build.lock"
+flock -n 9 || { echo "A Chorium build is already running in this volume" >&2; exit 1; }
 rm -f "$SRC/$OUT/.ninja_lock"
+if [[ $TARGET == win && -n ${WIN_TOOLCHAIN_HASH:-} ]]; then
+  python3 /umbra/scripts/hooks.py apply --src "$SRC" --platform win \
+    --only packaged-vs-version
+fi
 {
   cat /umbra/build/args/common.gn
   echo
@@ -93,7 +100,8 @@ nice -n 19 ionice -c3 autoninja -C "$OUT" -j "$JOBS" "${NINJA_ARGS[@]}"
 echo "BUILD DONE $(date -u +%FT%TZ)"
 if [[ -f $OUT/chorium.dll ]]; then
   # umbra_tor.dll comes from prebuilt/; cross builds ship snapshot_blob.bin.
-  ls -la "$OUT"/chorium.dll "$OUT"/chorium.pak "$OUT"/chorium_test.exe \
+  ls -la "$OUT"/Chorium.exe "$OUT"/chorium.dll "$OUT"/chorium.pak \
+         "$OUT"/chorium_test.exe \
          "$OUT"/icudtl.dat "$OUT"/snapshot_blob.bin
 fi
 if [[ -f $OUT/apks/Chorium.apk ]]; then

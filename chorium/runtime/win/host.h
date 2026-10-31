@@ -20,6 +20,9 @@ extern "C" { /* surface_d2d.cpp is C++ (DirectWrite has no C headers) */
 #define WM_APP_FRAME (WM_APP + 1) /* wParam = page id */
 #define WM_APP_EVENT (WM_APP + 2) /* wParam = page id, lParam = char* JSON */
 #define WM_APP_DRAW (WM_APP + 3)
+#define WM_APP_PICK (WM_APP + 4) /* lParam = the picker request */
+/* wParam = void (*)(void*), lParam = its argument (remote control) */
+#define WM_APP_CALL (WM_APP + 5)
 
 /* The latest frame of each page, by page id (0 unused). */
 typedef struct win_page {
@@ -38,7 +41,12 @@ typedef struct win_page {
 
 extern HWND g_hwnd;
 extern float g_scale; /* device pixels per CSS pixel */
+extern const char* g_data_dir; /* --data-dir, or NULL */
 extern win_page g_win_pages[MAX_PAGES + 1];
+
+/* --- sandbox_win.cc ------------------------------------------------------ */
+/* Hands Chromium's sandbox, linked into this .exe, to the engine. */
+void host_set_sandbox(void);
 
 /* --- platform_win.c ------------------------------------------------------ */
 void win_pages_init(void);
@@ -49,6 +57,10 @@ void surface_resize(int width_px, int height_px);
 void surface_set_scale(float scale);
 /* A page is closing: drop its bitmap (UI thread). */
 void surface_forget_page(uint32_t page_id);
+
+/* --- files_win.cpp ------------------------------------------------------ */
+/* Shows the picker for a WM_APP_PICK request and answers the app. */
+void win_run_picker(void* request);
 
 /* --- loader.c: starting without a command line --------------------------- */
 /* The app (.wasm) in the apps folder next to Chorium.exe, as a UTF-8 path;

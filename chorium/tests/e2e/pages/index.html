@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E2E home</title>
+<style>
+  body { font: 18px sans-serif; margin: 16px; }
+  a, button, input, img { display: block; margin: 14px 0; }
+  a { font-size: 22px; padding: 8px 0; }
+  input { font-size: 18px; width: 260px; padding: 8px; }
+  button { font-size: 18px; padding: 10px 16px; }
+</style>
+<a id="link" href="/pages/second.html">Second page</a>
+<a id="dl" href="/download/chorium-e2e-file.txt?size=2048">Download a file</a>
+<a id="dlslow" href="/slow/chorium-e2e-slow.bin">Download slowly</a>
+<img id="img" src="/cat.png" width="120" height="90" alt="cat">
+<input id="a" placeholder="first field">
+<input id="b" placeholder="second field">
+<input id="file" type="file" multiple accept=".txt,text/plain">
+<button id="fs" onclick="document.documentElement.requestFullscreen()">Full screen</button>
+<form id="search" onsubmit="event.preventDefault(); document.title = 'searched: ' + q.value">
+  <input id="q" name="q" placeholder="search">
+</form>
+<script>
+  // What the tests read back.
+  window.picked = [];
+  document.getElementById('file').addEventListener('change', async (e) => {
+    window.picked = await Promise.all([...e.target.files].map(async (f) =>
+        ({name: f.name, size: f.size, text: await f.text()})));
+  });
+</script>

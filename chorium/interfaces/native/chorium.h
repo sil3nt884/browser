@@ -48,7 +48,7 @@ extern "C" {
 /* Bumped whenever a function, callback or event changes. A program built
  * against this header should check chorium_abi_version() == CHORIUM_ABI_VERSION
  * before calling anything else. */
-#define CHORIUM_ABI_VERSION 2
+#define CHORIUM_ABI_VERSION 4
 
 typedef struct chorium_view chorium_view;
 
@@ -84,7 +84,22 @@ typedef void (*chorium_frame_fn)(chorium_view* view,
  *                                           Android: pulled past the page's
  *                                           edge (dx, dy: CSS pixels moved)
  *   {"type":"context_menu","x":10,"y":20,"link_url":"...","link_text":"...",
- *    "image_url":"...","selection":"..."}   long press / right click
+ *    "image_url":"...","selection":"...","editable":false,"edit":0}
+ *                                           long press / right click; in a
+ *                                           text field (desktop) "edit" has
+ *                                           the CHORIUM_EDIT_FLAG_* it allows
+ *   {"type":"download","id":4,"file_name":"a.zip","path":"C:\...\a.zip",
+ *    "url":"...","received":1024,"total":4096,
+ *    "state":"in_progress|done|failed|cancelled"}
+ *                                           a download started, moved on or
+ *                                           ended (sent by the page it came
+ *                                           from, else by any open page)
+ *   {"type":"file_chooser","id":5,
+ *    "mode":"open|open_multiple|open_folder|save",
+ *    "accept":".png\nimage/png","default_name":""}
+ *                                           the page wants files ("accept":
+ *                                           types, one per line); answer with
+ *                                           chorium_file_chooser_reply
  */
 typedef void (*chorium_event_fn)(chorium_view* view,
                                  const char* json,
@@ -104,6 +119,16 @@ CHORIUM_API int chorium_abi_version(void);
  * ratio for all views, e.g. 1.0 or 2.0. Returns 0 on success. Can be called
  * once per process; the engine can't be restarted after chorium_shutdown. */
 CHORIUM_API int chorium_init(float scale);
+
+/* Before engine startup only: UTF-8 directory for cookies and site storage.
+ * NULL/empty keeps the default memory-only profile. HTTP cache stays in RAM. */
+CHORIUM_API void chorium_set_profile_dir(const char* path);
+
+/* Asynchronously clears cookies and all site storage, preserving app settings,
+ * history and tabs. Pages may write new data after the clear completes. */
+CHORIUM_API void chorium_clear_site_data(void);
+/* Off by default. Also clears on the next start after a forced termination. */
+CHORIUM_API void chorium_set_clear_site_data_on_close(int on);
 
 /* Closes all views and stops the engine. Blocks until it has stopped. */
 CHORIUM_API void chorium_shutdown(void);
@@ -126,6 +151,32 @@ CHORIUM_API void chorium_set_dark_mode(int dark);
  * Tor needs a few seconds to connect again after being switched back on. */
 CHORIUM_API void chorium_set_tor(int on);
 CHORIUM_API int chorium_tor_enabled(void);
+
+/* How often pages draw: the screen's refresh rate (60, 120, 144...). 60
+ * until set; applies to open pages at once. Desktop only (Android pages
+ * follow their window). */
+CHORIUM_API void chorium_set_frame_rate(int hz);
+
+/* Desktop, before chorium_init: Chromium's DevTools protocol on
+ * 127.0.0.1:|port| (http://127.0.0.1:port/json), for automated tests. Off
+ * unless called; absent from builds with chorium_desktop_devtools = false. */
+CHORIUM_API void chorium_enable_devtools(int port);
+
+/* Where downloads go (UTF-8 folder, created if needed). Default: the user's
+ * Downloads folder. */
+CHORIUM_API void chorium_set_download_dir(const char* utf8);
+CHORIUM_API void chorium_cancel_download(int id);
+
+#if defined(_WIN32)
+/* Windows: turns on Chromium's sandbox for page, GPU and network helpers.
+ * The sandbox must live in your .exe (it patches the helpers it starts at
+ * the exe's addresses), so link //sandbox/win into it and pass
+ * sandbox::SandboxFactory::GetBrokerServices() and GetTargetServices(), in
+ * every process, before chorium_execute_process(). Without it helpers run
+ * unsandboxed. */
+CHORIUM_API void chorium_set_sandbox(void* broker_services,
+                                     void* target_services);
+#endif
 
 /* A page view, |width| x |height| CSS pixels. Starts on about:blank. */
 CHORIUM_API chorium_view* chorium_open(int width,
@@ -197,6 +248,29 @@ CHORIUM_API void chorium_dialog_reply(chorium_view* view,
                                       int id,
                                       int accept,
                                       const char* text);
+
+/* Text-field commands, for a context menu. */
+#define CHORIUM_EDIT_CUT 0
+#define CHORIUM_EDIT_COPY 1
+#define CHORIUM_EDIT_PASTE 2
+#define CHORIUM_EDIT_SELECT_ALL 3
+#define CHORIUM_EDIT_UNDO 4
+#define CHORIUM_EDIT_REDO 5
+/* Bit (1 << command) in a context_menu event's "edit". */
+#define CHORIUM_EDIT_FLAG(command) (1 << (command))
+CHORIUM_API void chorium_edit(chorium_view* view, int command);
+
+/* Downloads |url| as if the page had linked to it with "download". */
+CHORIUM_API void chorium_save_url(chorium_view* view, const char* url);
+/* Copies the image at (x, y) (CSS pixels) to the clipboard. */
+CHORIUM_API void chorium_copy_image_at(chorium_view* view, int x, int y);
+
+/* Answers a "file_chooser" event: |count| UTF-8 paths (Android: content://
+ * URIs too). |count| 0 means the person cancelled. */
+CHORIUM_API void chorium_file_chooser_reply(chorium_view* view,
+                                            int id,
+                                            const char* const* paths,
+                                            int count);
 
 #if defined(__ANDROID__)
 /* Android. The engine lives in the app's process and is started from Java

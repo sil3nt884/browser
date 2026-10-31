@@ -1,8 +1,8 @@
 /* Copyright 2026 The Umbra Authors. Use of this source code is governed by a
  * BSD-style license that can be found in the LICENSE file.
  *
- * The browser's own pages and menu: the ⋮ menu, Settings, History and (on
- * phones) the tab switcher. They are drawn by the app over the page area,
+ * The browser's own pages and menu: the ⋮ menu, Settings, History,
+ * Downloads and (on phones) the tab switcher. They are drawn by the app over the page area,
  * like chrome://settings, and keep their data in chorium.wasm (settings and
  * history).
  */
@@ -23,7 +23,10 @@ enum {
   HIT_TABS_NEW = 801,
   HIT_TAB_ROW = 900,       /* + tab index */
   HIT_TAB_ROW_CLOSE = 1000, /* + tab index */
+  HIT_DL_ROW = 1100,        /* + download index */
+  HIT_DL_ACTION = 1200,     /* + download index: cancel / show in folder */
 };
+#define DL_ROWS_MAX 100
 
 #define TAB_ROWS_MAX 100
 
@@ -41,10 +44,11 @@ typedef struct {
 static const menu_item_t kMenu[] = {
     {ICON(ADD), "New tab", "Ctrl+T"},
     {ICON(HISTORY), "History", "Ctrl+H"},
+    {ICON(DOWNLOAD), "Downloads", "Ctrl+J"},
     {ICON(SETTINGS), "Settings", ""},
     {ICON(LOCK), "Tor", ""}, /* with a switch */
 };
-#define MENU_TOR 3
+#define MENU_TOR 4
 #define MENU_COUNT (int)(sizeof kMenu / sizeof kMenu[0])
 #define MENU_ITEM_H (g_phone ? 48 : 36)
 #define MENU_ICONS_H 56 /* phones: Forward and Reload above the items */
@@ -277,6 +281,15 @@ static void build_settings(rect_t area) {
       case 4:
         add_row(ROW_CLEAR, &y, x, w, 56, "Clear browsing history",
                 "pages you visited, kept on this device", false, 3, 0);
+        add_row(ROW_CLEAR, &y, x, w, 56, "Clear cookies and site data",
+                "signs you out of websites", false, 3, 1);
+        {
+          char clear[16] = "";
+          get_setting("clear-site-data-on-close", clear, sizeof clear);
+          add_row(ROW_TOGGLE, &y, x, w, 64, "Clear when Chorium closes",
+                  "cookies and site data; off by default",
+                  strcmp(clear, "true") == 0, 5, 0);
+        }
         break;
     }
     g_cards[g_card_count++] = rect(x, start, w, y - start);
@@ -382,7 +395,7 @@ static void draw_settings(rect_t area) {
                 14, T->text);
         text_in(rect(r.x + 20, r.y + 30, (int)r.width - 130, 18), row->note,
                 12.5f, T->text_dim);
-        if (g_cleared) {
+        if (g_cleared && row->index == 0) {
           text_in(rect(r.x + (int)r.width - 110, r.y, 100, (int)r.height),
                   "Cleared", 13, T->text_dim);
         } else {
@@ -430,10 +443,18 @@ static void save_custom(int group) {
 static void click_settings_row(int i) {
   const row_t* row = &g_rows[i];
   if (row->kind == ROW_TOGGLE) {
+    if (row->group == 5) {
+      set_setting("clear-site-data-on-close", row->selected ? "false" : "true");
+      return;
+    }
     umbra_browser_browser_set_tor(!umbra_browser_browser_tor_enabled());
     return;
   }
   if (row->kind == ROW_CLEAR) {
+    if (row->index == 1) {
+      umbra_browser_browser_clear_site_data();
+      return;
+    }
     umbra_browser_browser_clear_history();
     g_cleared = true;
     g_history_loaded = false;
@@ -691,6 +712,111 @@ void close_tab_row(int index) {
   }
 }
 
+/* --- downloads ------------------------------------------------------------ */
+
+static rect_t download_row(rect_t area, size_t i) {
+  rect_t col = history_column(area);
+  return rect(col.x, area.y + 84 + (int)i * 60 - g_scroll, (int)col.width, 60);
+}
+
+static rect_t download_action(rect_t row) {
+  return rect(row.x + (int)row.width - 56, row.y + 6, 48, 48);
+}
+
+static void draw_downloads(rect_t area) {
+  umbra_browser_browser_list_download_t list;
+  umbra_browser_browser_downloads(&list);
+  size_t count = list.len < DL_ROWS_MAX ? list.len : DL_ROWS_MAX;
+  rect_t col = history_column(area);
+  text(col.x, area.y + 52 - g_scroll, "Downloads", 22, T->text);
+  if (!count) {
+    text(col.x, area.y + 110 - g_scroll, "Files you download will show here.",
+         14, T->text_dim);
+    g_content_h = 140;
+    umbra_browser_browser_list_download_free(&list);
+    return;
+  }
+  fill_round(rect(col.x, area.y + 84 - g_scroll, (int)col.width,
+                  (int)count * 60),
+             8, T->card);
+  char name[256], status[64];
+  for (size_t i = 0; i < count; ++i) {
+    const umbra_chorium_types_download_t* d = &list.ptr[i];
+    rect_t r = download_row(area, i);
+    if (r.y + (int)r.height < area.y || r.y > area.y + (int)area.height) {
+      continue;
+    }
+    bool done = d->state == UMBRA_CHORIUM_TYPES_DOWNLOAD_STATE_DONE;
+    bool running = d->state == UMBRA_CHORIUM_TYPES_DOWNLOAD_STATE_IN_PROGRESS;
+    if (g_hover == HIT_DL_ROW + (int)i && done) {
+      fill(r, T->hover);
+    }
+    copy_str(name, sizeof name, &d->file_name);
+    download_status(status, sizeof status, d);
+    icon_centered(done ? ICON(PAGE) : ICON(DOWNLOAD),
+                  rect(r.x + 12, r.y, 24, 60), 18,
+                  d->state == UMBRA_CHORIUM_TYPES_DOWNLOAD_STATE_FAILED
+                      ? T->error
+                      : running ? T->accent : T->icon);
+    int text_w = (int)r.width - 48 - 64;
+    text_in(rect(r.x + 48, r.y + 9, text_w, 22), name, 14,
+            done || running ? T->text : T->text_dim);
+    text_in(rect(r.x + 48, r.y + 31, text_w, 20), status, 12.5f, T->text_dim);
+    if (running && d->total) {
+      int w = (int)((double)text_w * (double)d->received / (double)d->total);
+      fill(rect(r.x + 48, r.y + 53, text_w, 2), T->separator);
+      fill(rect(r.x + 48, r.y + 53, w, 2), T->accent);
+    }
+    if (running || done) {
+      rect_t a = download_action(r);
+      if (g_hover == HIT_DL_ACTION + (int)i) {
+        circle(a.x + 24, a.y + 24, 18, T->separator);
+      }
+      icon_centered(running ? ICON(CLOSE) : ICON(FOLDER), a, 18, T->icon);
+    }
+    if (i > 0) {
+      fill(rect(r.x + 16, r.y, (int)r.width - 32, 1), T->page_bg);
+    }
+  }
+  g_content_h = 84 + (int)count * 60 + 24;
+  umbra_browser_browser_list_download_free(&list);
+}
+
+static int downloads_hit(int x, int y) {
+  umbra_browser_browser_list_download_t list;
+  umbra_browser_browser_downloads(&list);
+  int code = 0;
+  for (size_t i = 0; i < list.len && i < DL_ROWS_MAX; ++i) {
+    rect_t r = download_row(g_area, i);
+    if (inside(r, x, y)) {
+      code = inside(download_action(r), x, y) ? HIT_DL_ACTION + (int)i
+                                               : HIT_DL_ROW + (int)i;
+    }
+  }
+  umbra_browser_browser_list_download_free(&list);
+  return code;
+}
+
+static void downloads_click(int code) {
+  umbra_browser_browser_list_download_t list;
+  umbra_browser_browser_downloads(&list);
+  bool action = code >= HIT_DL_ACTION;
+  size_t i = (size_t)(code - (action ? HIT_DL_ACTION : HIT_DL_ROW));
+  if (i < list.len) {
+    const umbra_chorium_types_download_t* d = &list.ptr[i];
+    char path[2048];
+    copy_str(path, sizeof path, &d->path);
+    if (d->state == UMBRA_CHORIUM_TYPES_DOWNLOAD_STATE_IN_PROGRESS) {
+      if (action) {
+        umbra_browser_browser_cancel_download(d->id);
+      }
+    } else if (d->state == UMBRA_CHORIUM_TYPES_DOWNLOAD_STATE_DONE) {
+      open_download(path, action);
+    }
+  }
+  umbra_browser_browser_list_download_free(&list);
+}
+
 /* --- panels: shared ------------------------------------------------------- */
 
 void panel_open(panel_t panel) {
@@ -714,6 +840,8 @@ void panel_draw(rect_t area) {
     draw_settings(area);
   } else if (g_panel == PANEL_TABS) {
     draw_tabs(area);
+  } else if (g_panel == PANEL_DOWNLOADS) {
+    draw_downloads(area);
   } else {
     draw_history(area);
   }
@@ -752,7 +880,7 @@ int panels_hit(int x, int y) {
     for (int i = 0; i < g_row_count; ++i) {
       const row_t* row = &g_rows[i];
       if (row->kind == ROW_CLEAR) {
-        if (!g_cleared && inside(clear_button(row), x, y)) {
+        if ((!g_cleared || row->index == 1) && inside(clear_button(row), x, y)) {
           return HIT_ROW + i;
         }
       } else if (row->kind != ROW_NOTE && inside(row->r, x, y)) {
@@ -761,6 +889,11 @@ int panels_hit(int x, int y) {
     }
   } else if (g_panel == PANEL_TABS) {
     int code = tabs_hit(x, y);
+    if (code) {
+      return code;
+    }
+  } else if (g_panel == PANEL_DOWNLOADS) {
+    int code = downloads_hit(x, y);
     if (code) {
       return code;
     }
@@ -788,6 +921,9 @@ void panels_click(int code) {
         panel_open(PANEL_HISTORY);
         break;
       case 2:
+        panel_open(PANEL_DOWNLOADS);
+        break;
+      case 3:
         panel_open(PANEL_SETTINGS);
         break;
       case MENU_TOR:
@@ -828,6 +964,10 @@ void panels_click(int code) {
     if (id) {
       close_tab(id);
     }
+    return;
+  }
+  if (code >= HIT_DL_ROW && code < HIT_DL_ACTION + DL_ROWS_MAX) {
+    downloads_click(code);
     return;
   }
   /* A click anywhere in a panel leaves a custom field it isn't on. */

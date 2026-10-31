@@ -18,6 +18,11 @@
 
 #define MAX_APPS 16
 
+/* The C runtime uses explicitly bounded Win32 buffers. */
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+#endif
+
 void loader_error(const char* fmt, ...) {
   char message[1024];
   va_list args;

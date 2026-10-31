@@ -79,6 +79,21 @@ def _cc_include(header: str) -> Edit:
 
 HOOKS: list[Hook] = [
     Hook(
+        name="packaged-vs-version",
+        path="build/vs_toolchain.py",
+        why="Honor the explicitly selected version of a custom Windows toolchain.",
+        platforms=("win",),
+        comment="#",
+        edits=[Edit(
+            "insert_after", r"^    supported_versions = list\(MSVS_VERSIONS.keys\(\)\)",
+            "{indent}custom_version = os.environ.get('CHORIUM_VS_VERSION')\n"
+            "{indent}if custom_version:\n"
+            "{indent}    if custom_version not in supported_versions:\n"
+            "{indent}        raise ValueError('Unsupported CHORIUM_VS_VERSION')\n"
+            "{indent}    return custom_version",
+        )],
+    ),
+    Hook(
         name="startup",
         path="chrome/app/chrome_main_delegate.cc",
         why="Start Tor and lock the network down before anything else runs.",
@@ -303,9 +318,11 @@ class Result:
   new_content: Optional[str] = None
 
 
-def plan(src: str, platform: str) -> list[Result]:
+def plan(src: str, platform: str, only: str | None = None) -> list[Result]:
   results = []
   for hook in HOOKS:
+    if only and hook.name != only:
+      continue
     if platform not in hook.platforms:
       results.append(Result(hook, "skipped", f"not used on {platform}"))
       continue
@@ -346,8 +363,8 @@ def report(results: list[Result]) -> bool:
   return ok
 
 
-def cmd_apply(src: str, platform: str, dry_run: bool) -> int:
-  results = plan(src, platform)
+def cmd_apply(src: str, platform: str, dry_run: bool, only: str | None = None) -> int:
+  results = plan(src, platform, only)
   ok = report(results)
   if not ok:
     print("\nRequired hooks failed; nothing was written.", file=sys.stderr)
@@ -364,9 +381,11 @@ def cmd_apply(src: str, platform: str, dry_run: bool) -> int:
   return 0
 
 
-def cmd_revert(src: str) -> int:
+def cmd_revert(src: str, only: str | None = None) -> int:
   paths = []
   for hook in HOOKS:
+    if only and hook.name != only:
+      continue
     p = os.path.join(src, hook.path)
     if os.path.isfile(p):
       with open(p, encoding="utf-8", newline="") as f:
@@ -390,12 +409,16 @@ def main(argv=None) -> int:
                                formatter_class=argparse.RawDescriptionHelpFormatter)
   ap.add_argument("command", choices=["apply", "check", "revert", "list"])
   ap.add_argument("--src", help="Chromium src/ directory")
+  ap.add_argument("--only", choices=[h.name for h in HOOKS],
+                  help="apply/check a single hook")
   ap.add_argument("--platform", default=_default_platform(),
                   choices=["win", "android", "linux", "mac"])
   args = ap.parse_args(argv)
 
   if args.command == "list":
     for h in HOOKS:
+      if args.only and h.name != args.only:
+        continue
       req = "required" if h.required else "optional"
       print(f"{h.name:<18} {req:<9} {','.join(h.platforms):<22} {h.path}\n"
             f"{'':<18} {h.why}")
@@ -403,8 +426,8 @@ def main(argv=None) -> int:
   if not args.src or not os.path.isdir(args.src):
     ap.error("--src must point at Chromium's src/ directory")
   if args.command == "revert":
-    return cmd_revert(args.src)
-  return cmd_apply(args.src, args.platform, dry_run=args.command == "check")
+    return cmd_revert(args.src, only=args.only)
+  return cmd_apply(args.src, args.platform, dry_run=args.command == "check", only=args.only)
 
 
 def _default_platform() -> str:

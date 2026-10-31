@@ -30,6 +30,12 @@ val_t v_u32(uint32_t n) {
   return v;
 }
 
+val_t v_u64(uint64_t n) {
+  val_t v = {.kind = WASMTIME_COMPONENT_U64};
+  v.of.u64 = n;
+  return v;
+}
+
 val_t v_s32(int32_t n) {
   val_t v = {.kind = WASMTIME_COMPONENT_S32};
   v.of.s32 = n;

@@ -54,7 +54,13 @@ typedef enum {
   FOCUS_CUSTOM_HOME,
 } focus_t;
 
-typedef enum { PANEL_NONE, PANEL_SETTINGS, PANEL_HISTORY, PANEL_TABS } panel_t;
+typedef enum {
+  PANEL_NONE,
+  PANEL_SETTINGS,
+  PANEL_HISTORY,
+  PANEL_TABS,
+  PANEL_DOWNLOADS,
+} panel_t;
 
 extern umbra_chorium_types_size_t g_size; /* surface, CSS pixels */
 extern uint32_t g_active;                 /* tab id */
@@ -103,6 +109,8 @@ void field_set(field_t* f, const char* value, bool select_all);
 /* True if the key was used; *enter is set on Enter. */
 bool field_key(field_t* f, const keypress_t* k, bool* enter);
 void field_text(field_t* f, const app_string_t* s);
+/* Ctrl+V: the clipboard's text, on one line. */
+void field_paste(field_t* f);
 /* Draws the contents at |x| in |r| (vertically centred), with selection or
  * caret when focused, else |placeholder| if empty. */
 void field_draw(const field_t* f, rect_t r, int x, float size, bool focused,
@@ -127,6 +135,27 @@ void context_menu_close(void);
 void context_menu_draw(void);
 int context_menu_hit(int x, int y);
 void context_menu_click(int code);
+
+/* --- files.c -------------------------------------------------------------- */
+
+/* Hit codes of the download notice. */
+enum {
+  HIT_NOTICE = 1300, /* + button: 0 close, 1 show in folder, 2 open */
+  HIT_NOTICE_BODY = 1310,
+};
+
+void format_size(char* out, size_t cap, uint64_t bytes);
+/* "1.2 MB of 5.0 MB", "Failed", ... */
+void download_status(char* out, size_t cap,
+                     const umbra_chorium_types_download_t* d);
+void open_download(const char* path, bool in_folder);
+void downloads_event(const umbra_chorium_types_download_t* d);
+void notice_draw(rect_t page);
+int notice_hit(int x, int y);
+void notice_click(int code);
+void notice_close(void);
+void file_chooser_event(uint32_t tab, umbra_chorium_types_file_chooser_t* c);
+void files_picked(umbra_chorium_types_files_picked_t* p);
 
 /* --- panels.c ------------------------------------------------------------- */
 

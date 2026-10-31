@@ -14,11 +14,12 @@
 // chorium.wasm owns the pages; the app sees tabs by id. It draws its own UI
 // with `surface` and never touches `pages` or `net` itself.
 
-package umbra:browser@0.2.0;
+package umbra:browser@0.3.0;
 
 interface browser {
-  use umbra:chorium/types@0.3.0.{size, rect, input, page-event, dialog,
-                                 overscroll, context-menu};
+  use umbra:chorium/types@0.4.0.{size, rect, input, page-event, dialog,
+                                 overscroll, context-menu, edit-command,
+                                 download, file-chooser};
 
   // Tabs are numbered from 1; an id is never reused.
   type tab-id = u32;
@@ -63,6 +64,11 @@ interface browser {
     context-menu(tuple<tab-id, context-menu>),
     // The page went full screen (a video) or left it.
     fullscreen(tuple<tab-id, bool>),
+    // A download started, moved on or ended.
+    download(download),
+    // A page asked for files: pick them (surface.pick-files) and answer
+    // with file-chooser-reply.
+    file-chooser(tuple<tab-id, file-chooser>),
   }
 
   // A new tab |size| CSS pixels big, going to |text| (see navigate); empty
@@ -82,6 +88,16 @@ interface browser {
   exit-fullscreen: func(tab: tab-id);
   // Pages follow the app's theme: prefers-color-scheme dark or light.
   set-dark-mode: func(dark: bool);
+
+  // The context menu's commands.
+  edit: func(tab: tab-id, command: edit-command);
+  save-url: func(tab: tab-id, url: string);
+  copy-image-at: func(tab: tab-id, x: s32, y: s32);
+  file-chooser-reply: func(tab: tab-id, id: u32, paths: list<string>);
+
+  // This run's downloads, newest first.
+  downloads: func() -> list<download>;
+  cancel-download: func(id: u32);
   info: func(tab: tab-id) -> option<tab-info>;
 
   // |text| is what a person typed: a URL, a host name, or words to search
@@ -108,6 +124,7 @@ interface browser {
   // Visited pages, most recent first; kept in the app's data directory.
   history: func(limit: u32) -> list<history-entry>;
   clear-history: func();
+  clear-site-data: func();
 
   // Settings, kept in the app's data directory. Known keys:
   //   search    URL template for typed words, %s = the words
@@ -127,10 +144,10 @@ interface browser {
 
 // chorium.wasm.
 world portable {
-  import umbra:chorium/pages@0.3.0;
-  import umbra:chorium/net@0.3.0;
-  import umbra:chorium/files@0.3.0;
-  import umbra:chorium/log@0.3.0;
+  import umbra:chorium/pages@0.4.0;
+  import umbra:chorium/net@0.4.0;
+  import umbra:chorium/files@0.4.0;
+  import umbra:chorium/log@0.4.0;
   export browser;
 }
 
@@ -138,10 +155,10 @@ world portable {
 // the runtime's `runnable` world: same exports, same meaning.
 world app {
   import browser;
-  import umbra:chorium/surface@0.3.0;
-  import umbra:chorium/log@0.3.0;
+  import umbra:chorium/surface@0.4.0;
+  import umbra:chorium/log@0.4.0;
 
-  use umbra:chorium/types@0.3.0.{input, page-event};
+  use umbra:chorium/types@0.4.0.{input, page-event};
 
   export start: func(args: list<string>);
   export on-input: func(event: input);

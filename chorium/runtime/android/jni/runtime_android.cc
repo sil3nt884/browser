@@ -34,9 +34,11 @@
 #include "base/no_destructor.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
+#include "remote.h"
 #include "runtime.h"
 #include "umbra/chorium/runtime/android/runtime_jni/AppView_jni.h"
 #include "umbra/chorium/runtime/android/runtime_jni/ChoriumNatives_jni.h"
+#include "umbra/chorium/runtime/android/runtime_jni/RemoteControl_jni.h"
 
 using base::android::AttachCurrentThread;
 using base::android::ConvertJavaStringToUTF8;
@@ -109,6 +111,12 @@ void Rect(int32_t op, int x, int y, int w, int h) {
   Put(y);
   Put(w);
   Put(h);
+}
+
+// The main thread's task runner, for the remote control's server thread.
+scoped_refptr<base::SingleThreadTaskRunner>& UiRunner() {
+  static base::NoDestructor<scoped_refptr<base::SingleThreadTaskRunner>> ui;
+  return *ui;
 }
 
 void PostToUi(base::OnceClosure task) {
@@ -274,6 +282,29 @@ void surface_copy_text(const char* utf8, size_t len) {
       env, ConvertUTF8ToJavaString(env, std::string_view(utf8, len)));
 }
 
+char* surface_read_clipboard(void) {
+  JNIEnv* env = AttachCurrentThread();
+  std::string text = ConvertJavaStringToUTF8(env, Java_AppView_readClipboard(env));
+  return strdup(text.c_str());
+}
+
+void surface_pick_files(uint32_t request, picker_mode_t mode,
+                        const char* const* accept, size_t count,
+                        const char* default_name) {
+  JNIEnv* env = AttachCurrentThread();
+  std::vector<std::string> types(accept, accept + count);
+  // The picker is another activity: its answer comes later, through
+  // JNI_ChoriumNatives_FilesPicked.
+  Java_AppView_pickFiles(env, static_cast<int>(request), static_cast<int>(mode),
+                         base::android::ToJavaArrayOfStrings(env, types),
+                         ConvertUTF8ToJavaString(env, default_name));
+}
+
+void surface_open_file(const char* path, bool in_folder) {
+  JNIEnv* env = AttachCurrentThread();
+  Java_AppView_openFile(env, ConvertUTF8ToJavaString(env, path), in_folder);
+}
+
 bool title_bar_layout(uint32_t* height, uint32_t* buttons_width,
                       bool* maximized) {
   return false;  // the system bars belong to Android
@@ -356,14 +387,54 @@ void platform_tor_restarted(void) {
   }
 }
 
+// --- remote.h: the remote control ------------------------------------------
+
+void platform_post_to_ui(void (*fn)(void*), void* arg) {
+  UiRunner()->PostTask(
+      FROM_HERE, base::BindOnce([](void (*fn)(void*), void* arg) { fn(arg); },
+                                fn, base::Unretained(arg)));
+}
+
+void platform_remote_input(const remote_input_t* in) {
+  JNIEnv* env = AttachCurrentThread();
+  Java_RemoteControl_input(env, static_cast<int>(in->kind), in->x, in->y,
+                           in->code, in->mods,
+                           ConvertUTF8ToJavaString(env, in->text ? in->text : ""));
+}
+
+// The page is its own surface, which no in-app capture includes: the tests
+// take screenshots with adb (screencap) instead.
+void platform_screenshot(void* token) {
+  remote_screenshot_done(token, nullptr, nullptr, 0);
+}
+
+bool platform_answer_picker(const char* const* paths, size_t count) {
+  JNIEnv* env = AttachCurrentThread();
+  std::vector<std::string> list(paths, paths + count);
+  return Java_RemoteControl_answerPicker(
+      env, base::android::ToJavaArrayOfStrings(env, list));
+}
+
 // --- JNI: ChoriumNatives.java -----------------------------------------------------
+
+static void JNI_ChoriumNatives_Profile(JNIEnv* env,
+                                      const JavaRef<jstring>& path) {
+  std::string directory = ConvertJavaStringToUTF8(env, path);
+  chorium_set_profile_dir(directory.c_str());
+}
 
 static jboolean JNI_ChoriumNatives_Start(JNIEnv* env,
                                   const JavaRef<jbyteArray>& wasm,
                                   const JavaRef<jstring>& app_name,
                                   const JavaRef<jstring>& files_dir,
-                                  const JavaRef<jobjectArray>& args) {
+                                  const JavaRef<jobjectArray>& args,
+                                  jboolean remote_control) {
   FilesDir() = ConvertJavaStringToUTF8(env, files_dir);
+  UiRunner() = base::SingleThreadTaskRunner::GetCurrentDefault();
+  if (remote_control && !remote_start()) {
+    __android_log_print(ANDROID_LOG_ERROR, "chorium",
+                        "remote control: can't listen");
+  }
   std::vector<uint8_t> bytes;
   base::android::JavaByteArrayToByteVector(env, wasm, &bytes);
   std::string name = ConvertJavaStringToUTF8(env, app_name);
@@ -435,6 +506,19 @@ static void JNI_ChoriumNatives_Back(JNIEnv* env) {
   app_input(v_variant("back", nullptr));
 }
 
+static void JNI_ChoriumNatives_FilesPicked(JNIEnv* env,
+                                           jint request,
+                                           const JavaRef<jobjectArray>& paths) {
+  std::vector<std::string> strings;
+  base::android::AppendJavaStringArrayToStringVector(env, paths, &strings);
+  std::vector<const char*> c_paths;
+  for (const std::string& s : strings) {
+    c_paths.push_back(s.c_str());
+  }
+  app_files_picked(static_cast<uint32_t>(request), c_paths.data(),
+                   c_paths.size());
+}
+
 static void JNI_ChoriumNatives_Focus(JNIEnv* env, jboolean focused) {
   val_t b = v_bool(focused);
   app_input(v_variant("focus", &b));
@@ -457,3 +541,4 @@ static void JNI_ChoriumNatives_Stop(JNIEnv* env) {
 
 DEFINE_JNI(ChoriumNatives)
 DEFINE_JNI(AppView)
+DEFINE_JNI(RemoteControl)

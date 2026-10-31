@@ -8,14 +8,22 @@
 #include <utility>
 
 #include "base/base64.h"
+#include "base/files/file_enumerator.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/json/json_writer.h"
 #include "base/memory/read_only_shared_memory_region.h"
 #include "base/no_destructor.h"
+#include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
+#include "components/download/public/common/download_url_parameters.h"
 #include "content/public/browser/context_menu_params.h"
+#include "content/public/browser/download_manager.h"
+#include "content/public/browser/download_request_utils.h"
 #include "components/input/native_web_keyboard_event.h"
 #include "components/viz/host/client_frame_sink_video_capturer.h"
 #include "content/public/browser/navigation_controller.h"
@@ -30,10 +38,13 @@
 #include "media/capture/mojom/video_capture_buffer.mojom.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/base/net_errors.h"
+#include "net/traffic_annotation/network_traffic_annotation.h"
+#include "third_party/blink/public/common/context_menu_data/edit_flags.h"
 #include "third_party/blink/public/common/input/web_input_event.h"
 #include "third_party/blink/public/common/input/web_mouse_event.h"
 #include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
 #include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
+#include "third_party/blink/public/mojom/choosers/file_chooser.mojom.h"
 #include "third_party/blink/public/mojom/context_menu/context_menu.mojom-shared.h"
 #include "third_party/blink/public/mojom/peerconnection/webrtc_ip_handling_policy.mojom.h"
 #include "ui/base/page_transition_types.h"
@@ -41,12 +52,14 @@
 #include "ui/events/keycodes/dom/dom_code.h"
 #include "ui/events/keycodes/dom/dom_key.h"
 #include "ui/events/keycodes/keyboard_code_conversion.h"
+#include "ui/compositor/compositor.h"
 #include "ui/gfx/geometry/size_conversions.h"
 #include "umbra/chorium/engine/src/browser_context.h"
 #include "umbra/chorium/engine/src/engine.h"
 #include "url/gurl.h"
 
 #if BUILDFLAG(IS_ANDROID)
+#include "base/android/content_uri_utils.h"
 #include "umbra/chorium/engine/src/android/page_host.h"
 #else
 #include "ui/aura/window.h"
@@ -141,6 +154,31 @@ void View::PreferencesChanged() {
 }
 
 // static
+void View::FrameRateChanged() {
+  for (View* view : Views()) {
+#if !BUILDFLAG(IS_ANDROID)
+    // A windowless compositor ticks on its own timer, 60 Hz by default.
+    view->host_->compositor()->SetDisplayVSyncParameters(
+        base::TimeTicks::Now(), base::Seconds(1) / State().frame_hz);
+#endif
+    if (view->capturer_) {
+      view->capturer_->SetMinCapturePeriod(base::Seconds(1) /
+                                           State().frame_hz);
+    }
+  }
+}
+
+// static
+View* View::ForWebContentsOrAny(content::WebContents* web_contents) {
+  for (View* view : Views()) {
+    if (view->web_contents_.get() == web_contents) {
+      return view;
+    }
+  }
+  return Views().empty() ? nullptr : *Views().begin();
+}
+
+// static
 void View::CloseAll() {
   while (!Views().empty()) {
     Close((*Views().begin())->handle_);
@@ -174,6 +212,8 @@ View::View(chorium_view* handle, int width, int height)
   root->AddChild(native_view);
   native_view->Show();
   host_->Show();
+  host_->compositor()->SetDisplayVSyncParameters(
+      base::TimeTicks::Now(), base::Seconds(1) / State().frame_hz);
   Resize(width, height);
 
   // Keep the page rendering at full rate even though nothing shows it.
@@ -194,6 +234,10 @@ View::~View() {
     std::move(callback).Run(false, std::u16string());
   }
   dialogs_.clear();
+  for (auto& [id, chooser] : choosers_) {
+    chooser.listener->FileSelectionCanceled();
+  }
+  choosers_.clear();
   if (capturer_) {
     capturer_->StopAndResetConsumer();
     capturer_.reset();
@@ -240,7 +284,7 @@ void View::StartCapture() {
   }
   capturer_ = rwhv->CreateVideoCapturer();
   capturer_->SetFormat(media::PIXEL_FORMAT_ARGB);  // BGRA in memory
-  capturer_->SetMinCapturePeriod(base::Seconds(1) / 60);
+  capturer_->SetMinCapturePeriod(base::Seconds(1) / State().frame_hz);
   capturer_->SetMinSizeChangePeriod(base::TimeDelta());
   const gfx::Size px = ToPixels(size_);
   capturer_->SetResolutionConstraints(px, px, /*use_fixed_aspect_ratio=*/true);
@@ -473,6 +517,12 @@ void View::Text(const std::u16string& text) {
       ++i;
     }
     ch.windows_key_code = ch.text[0];
+    char32_t character = ch.text[0];
+    if (ch.text[1]) {
+      character = 0x10000 + ((ch.text[0] - 0xD800) << 10) +
+                  (ch.text[1] - 0xDC00);
+    }
+    ch.dom_key = ui::DomKey::FromCharacter(character);
     widget->ForwardKeyboardEvent(ch);
   }
 }
@@ -585,15 +635,40 @@ bool View::HandleContextMenu(content::RenderFrameHost& render_frame_host,
       params.media_type == blink::mojom::ContextMenuDataMediaType::kImage &&
       params.src_url.is_valid();
   bool link = params.link_url.is_valid();
-  // Text fields keep their own menu (Android's paste bubble). On Android a
-  // long press on plain text selects it with the system's selection menu.
+  // On Android text fields keep their own menu (the paste bubble) and a long
+  // press on plain text selects it with the system's selection menu.
 #if BUILDFLAG(IS_ANDROID)
+  if (params.is_editable) {
+    return false;
+  }
   bool selection = false;
+  bool editable = false;
 #else
   bool selection = !params.selection_text.empty();
+  bool editable = params.is_editable;
 #endif
-  if (params.is_editable || (!link && !image && !selection)) {
+  if (!editable && !link && !image && !selection) {
     return false;
+  }
+  int edit = 0;
+  if (editable) {
+    using Flags = blink::ContextMenuDataEditFlags;
+    const struct {
+      int blink;
+      int command;
+    } kEdit[] = {
+        {Flags::kCanCut, CHORIUM_EDIT_CUT},
+        {Flags::kCanCopy, CHORIUM_EDIT_COPY},
+        {Flags::kCanPaste, CHORIUM_EDIT_PASTE},
+        {Flags::kCanSelectAll, CHORIUM_EDIT_SELECT_ALL},
+        {Flags::kCanUndo, CHORIUM_EDIT_UNDO},
+        {Flags::kCanRedo, CHORIUM_EDIT_REDO},
+    };
+    for (const auto& e : kEdit) {
+      if (params.edit_flags & e.blink) {
+        edit |= CHORIUM_EDIT_FLAG(e.command);
+      }
+    }
   }
   Emit(base::DictValue()
            .Set("type", "context_menu")
@@ -602,8 +677,179 @@ bool View::HandleContextMenu(content::RenderFrameHost& render_frame_host,
            .Set("link_url", link ? params.link_url.spec() : std::string())
            .Set("link_text", link ? params.link_text : std::u16string())
            .Set("image_url", image ? params.src_url.spec() : std::string())
-           .Set("selection", params.selection_text));
+           .Set("selection", params.selection_text)
+           .Set("editable", editable)
+           .Set("edit", edit));
   return true;
+}
+
+void View::RunFileChooser(content::RenderFrameHost* render_frame_host,
+                          scoped_refptr<content::FileSelectListener> listener,
+                          const blink::mojom::FileChooserParams& params) {
+  using Mode = blink::mojom::FileChooserParams::Mode;
+  const char* mode = "open";
+  switch (params.mode) {
+    case Mode::kOpen:
+      break;
+    case Mode::kOpenMultiple:
+      mode = "open_multiple";
+      break;
+    case Mode::kUploadFolder:
+    case Mode::kOpenDirectory:
+      mode = "open_folder";
+      break;
+    case Mode::kSave:
+      mode = "save";
+      break;
+  }
+  std::vector<std::string> accept;
+  for (const std::u16string& type : params.accept_types) {
+    accept.push_back(base::UTF16ToUTF8(type));
+  }
+  int id = next_chooser_id_++;
+  choosers_[id] = Chooser{std::move(listener), params.mode};
+  Emit(base::DictValue()
+           .Set("type", "file_chooser")
+           .Set("id", id)
+           .Set("mode", mode)
+           .Set("accept", base::JoinString(accept, "\n"))
+           .Set("default_name",
+                params.default_file_name.BaseName().AsUTF8Unsafe()));
+}
+
+namespace {
+
+blink::mojom::FileChooserFileInfoPtr NativeFile(const base::FilePath& path) {
+  std::u16string name = path.BaseName().AsUTF16Unsafe();
+#if BUILDFLAG(IS_ANDROID)
+  // A content:// URI says nothing about the file's name; its provider does.
+  if (path.IsContentUri()) {
+    base::MaybeGetFileDisplayName(path, &name);
+  }
+#endif
+  return blink::mojom::FileChooserFileInfo::NewNativeFile(
+      blink::mojom::NativeFileInfo::New(path, name,
+                                        std::vector<std::u16string>()));
+}
+
+struct Chosen {
+  std::vector<blink::mojom::FileChooserFileInfoPtr> files;
+  base::FilePath base_dir;
+};
+
+bool IsFolder(const base::FilePath& path) {
+#if BUILDFLAG(IS_ANDROID)
+  if (path.IsContentUri()) {
+    return false;  // Android pickers hand over files only
+  }
+#endif
+  return base::DirectoryExists(path);
+}
+
+// Off the engine thread (it asks the disk, or Android's providers): the
+// files to give the page. A chosen folder means every file under it.
+Chosen ResolveChosen(std::vector<base::FilePath> paths) {
+  Chosen chosen;
+  for (const base::FilePath& path : paths) {
+    if (IsFolder(path)) {
+      if (chosen.base_dir.empty()) {
+        chosen.base_dir = path;
+      }
+      base::FileEnumerator e(path, /*recursive=*/true,
+                             base::FileEnumerator::FILES);
+      for (base::FilePath file = e.Next(); !file.empty(); file = e.Next()) {
+        chosen.files.push_back(NativeFile(file));
+      }
+    } else {
+      chosen.files.push_back(NativeFile(path));
+    }
+  }
+  return chosen;
+}
+
+}  // namespace
+
+void View::FileChooserReply(int id, const std::vector<std::string>& paths) {
+  auto it = choosers_.find(id);
+  if (it == choosers_.end()) {
+    return;
+  }
+  Chooser chooser = std::move(it->second);
+  choosers_.erase(it);
+  if (paths.empty()) {
+    chooser.listener->FileSelectionCanceled();
+    return;
+  }
+  std::vector<base::FilePath> files;
+  for (const std::string& path : paths) {
+    files.push_back(base::FilePath::FromUTF8Unsafe(path));
+  }
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_BLOCKING},
+      base::BindOnce(&ResolveChosen, std::move(files)),
+      base::BindOnce(
+          [](scoped_refptr<content::FileSelectListener> listener,
+             blink::mojom::FileChooserParams::Mode mode, Chosen chosen) {
+            listener->FileSelected(std::move(chosen.files), chosen.base_dir,
+                                   mode);
+          },
+          std::move(chooser.listener), chooser.mode));
+}
+
+void View::Edit(int command) {
+  switch (command) {
+    case CHORIUM_EDIT_CUT:
+      web_contents_->Cut();
+      break;
+    case CHORIUM_EDIT_COPY:
+      web_contents_->Copy();
+      break;
+    case CHORIUM_EDIT_PASTE:
+      web_contents_->Paste();
+      break;
+    case CHORIUM_EDIT_SELECT_ALL:
+      web_contents_->SelectAll();
+      break;
+    case CHORIUM_EDIT_UNDO:
+      web_contents_->Undo();
+      break;
+    case CHORIUM_EDIT_REDO:
+      web_contents_->Redo();
+      break;
+  }
+}
+
+void View::SaveUrl(const std::string& url) {
+  GURL gurl(url);
+  if (!gurl.is_valid()) {
+    return;
+  }
+  net::NetworkTrafficAnnotationTag annotation =
+      net::DefineNetworkTrafficAnnotation("chorium_save_url", R"(
+        semantics {
+          sender: "Chorium"
+          description: "Saves a link or image the person chose to save."
+          trigger: "Save link / Save image in the context menu."
+          data: "None beyond the request for the file."
+          destination: WEBSITE
+        }
+        policy {
+          cookies_allowed: YES
+          setting: "None."
+          policy_exception_justification: "Not implemented."
+        })");
+  std::unique_ptr<download::DownloadUrlParameters> params =
+      content::DownloadRequestUtils::CreateDownloadForWebContentsMainFrame(
+          web_contents_.get(), gurl, annotation);
+  params->set_content_initiated(false);
+  web_contents_->GetBrowserContext()->GetDownloadManager()->DownloadUrl(
+      std::move(params));
+}
+
+void View::CopyImageAt(int x, int y) {
+  if (content::RenderFrameHost* frame = web_contents_->GetPrimaryMainFrame()) {
+    frame->CopyImageAt(x, y);
+  }
 }
 
 void View::Overscroll(const char* kind, const char* phase, float dx,

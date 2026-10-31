@@ -1,5 +1,52 @@
 # Umbra: notes for Claude Code
 
+## Continuation (2026-10-31)
+
+Chorium's previously failed Docker Windows build now succeeds, including
+`Chorium.exe` linked to Chromium's sandbox. Portable output:
+`C:\me-tor\chorium-out\Chorium-Windows`. The real Windows e2e suite passes
+22/22 (with `--network`); the app suite passes 188 checks in 20 desktop/phone
+scenarios. Hook tests: 7 pass. Page frame rate: 144 fps on the 144 Hz display.
+Renderer audit: integrity RID 0, in a job, win32k system calls disabled.
+
+Cookies and site storage now persist. Page HTTP cache stays in RAM. Windows
+cookie values use Chromium OSCrypt with a DPAPI-protected key. Settings has
+separate history/site-data clearing and an off-by-default clear-on-close
+switch; a marker also clears the engine profile after forced termination.
+The test checks cookies, localStorage, IndexedDB, service workers and
+CacheStorage across restart and clearing, and checks encrypted cookie rows.
+Contracts are now lower WIT 0.4.0, upper WIT 0.3.0, native ABI 4.
+
+Build fixes include Windows headers, Blink edit flags/file-picker enum,
+native C buffer-warning compatibility, and `packaged-vs-version` in
+`scripts/hooks.py`: the VS 2022 package must not be repeatedly revalidated
+against Chromium's default VS 2026. `build.sh` applies that hook and locks
+the volume against concurrent native builds.
+
+Sandboxed renderers need `content::PatchServiceManagerCalls()` before
+lockdown so DirectWrite can use font bytes supplied by FontDataService.
+Without it, pages had no visible text. Typed character events also need a
+DOM key. Both are covered by actual window/input tests now. Keep the
+sandbox enabled when fixing rendering/input problems.
+
+Windows e2e opens and restarts visible windows. Its final pass is complete;
+avoid unnecessary repeats. Use `adb -P 5038` explicitly: this adb build did
+not honor `ADB_SERVER_PORT`. Phone serial: `6toz4p9pdm898p9d`.
+The RAM-cache follow-up also disables GPU shader disk caching and compression
+dictionary caching. Its two storage tests pass with the real Windows runtime
+kept hidden (`C:\me-tor\chorium-out\check_cache_hidden.py`), including checks
+that those cache directories are absent. New portable output:
+`C:\me-tor\chorium-out\Chorium-Windows-RAM-cache`; the older tested folder
+is left intact because the user is running MotionMark in it.
+
+Android native and Java checks now pass. An unused `dy` JNI argument was
+removed to pass Error Prone. The full APK build is running in
+`chorium-android`; no phone test has run yet. Test profiles now live under
+`files/test-profiles/<name>` and require the remote-control flag, so intent
+extras cannot clear normal app data.
+Android compilation/testing is still in progress; update this status when
+finished. Do not run Windows and Android native builds together.
+
 Chromium fork (Brave-style: this repo is linked in as `src/umbra` inside a
 Chromium checkout) that routes all traffic through an in-process Tor (Arti)
 and is tuned to feel fast: hover/touch prerendering of same-origin links,
@@ -103,8 +150,8 @@ sample). Contracts: `interfaces/chorium/chorium.wit` (lower) and
 (`chorium/docker`, image `chorium-build:157`, volume `chorium-work`); the
 Windows engine is cross-compiled. Verified on Windows 11: pages through
 Tor, fail closed without umbra_tor.dll, composed app with tabs, settings,
-history. Not done: sandbox (user's decision), Linux runtime, file and colour
-pickers.
+history. The 2026-10-31 continuation adds the Windows sandbox and file
+pickers; Linux runtime and colour pickers remain unfinished.
 
 Android runtime (`runtime/android/`, Chorium.apk, arm64) verified on a
 Redmi Note 14 (Android 16), 2026-10-30: phone layout, Chrome-style gestures

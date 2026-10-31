@@ -11,8 +11,11 @@ final class ChoriumNatives {
 
     @NativeMethods
     interface Natives {
+        /** Must run before Chromium creates its BrowserContext. */
+        void profile(String path);
         /** Loads and starts the app; false if it couldn't (already reported). */
-        boolean start(byte[] wasm, String appName, String filesDir, String[] args);
+        boolean start(byte[] wasm, String appName, String filesDir, String[] args,
+                boolean remoteControl);
 
         /** The surface's size in pixels, pixels per CSS pixel, and dark mode. */
         void surface(int widthPx, int heightPx, float density, boolean dark);
@@ -28,6 +31,9 @@ final class ChoriumNatives {
         void text(String text);
 
         void back();
+
+        /** The file picker closed: paths or content:// URIs, none if cancelled. */
+        void filesPicked(int request, String[] paths);
 
         void focus(boolean focused);
 

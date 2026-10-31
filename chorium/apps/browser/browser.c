@@ -518,6 +518,8 @@ static void draw_toolbar(const tab_info_t* active, size_t tab_count) {
     which = ICON(HISTORY);
   } else if (panel && g_panel == PANEL_TABS) {
     which = ICON(PAGE);
+  } else if (panel && g_panel == PANEL_DOWNLOADS) {
+    which = ICON(DOWNLOAD);
   }
   icon_centered(which, rect(box.x + 8, box.y, 24, (int)box.height), 15,
                 error[0] && !editing ? T->error : T->icon);
@@ -542,9 +544,10 @@ static void draw_toolbar(const tab_info_t* active, size_t tab_count) {
     field_draw(&g_address, text_box, text_box.x, 14, true, placeholder);
   } else if (panel) {
     text_in(text_box,
-            g_panel == PANEL_SETTINGS  ? "chorium://settings"
-            : g_panel == PANEL_HISTORY ? "chorium://history"
-                                       : "Open tabs",
+            g_panel == PANEL_SETTINGS    ? "chorium://settings"
+            : g_panel == PANEL_HISTORY   ? "chorium://history"
+            : g_panel == PANEL_DOWNLOADS ? "chorium://downloads"
+                                         : "Open tabs",
             14, T->text);
   } else if (tor_on && tor >= 0 && tor < 100 &&
              (!url[0] || !strncmp(url, "about:", 6))) {
@@ -589,6 +592,8 @@ static void show_title(const tab_info_t* active) {
     snprintf(title, sizeof title, "History");
   } else if (g_panel == PANEL_TABS) {
     snprintf(title, sizeof title, "Tabs");
+  } else if (g_panel == PANEL_DOWNLOADS) {
+    snprintf(title, sizeof title, "Downloads");
   } else if (active && active->title.len) {
     copy_str(title, sizeof title, &active->title);
   }
@@ -631,6 +636,9 @@ static void draw(void) {
     umbra_browser_browser_resize(g_active, &size);
     umbra_browser_browser_draw(g_active, &area);
     overscroll_draw(area);
+    if (!g_fullscreen) {
+      notice_draw(area);
+    }
   }
   if (g_menu_open) {
     /* Invisible, but where a page is its own native view under the app's
@@ -720,7 +728,8 @@ static int hit(int x, int y) {
   if (g_panel != PANEL_NONE) {
     return panels_hit(x, y);
   }
-  return HIT_PAGE;
+  int notice = g_fullscreen ? 0 : notice_hit(x, y);
+  return notice ? notice : HIT_PAGE;
 }
 
 static uint32_t tab_id_at(int index) {
@@ -741,6 +750,10 @@ static void click(int code, const pointer_t* p) {
   }
   if (code >= HIT_CTX_ITEM && code <= HIT_CTX_DISMISS) {
     context_menu_click(code);
+    return;
+  }
+  if (code >= HIT_NOTICE && code <= HIT_NOTICE_BODY) {
+    notice_click(code);
     return;
   }
   if (code != HIT_ADDRESS && g_focus == FOCUS_ADDRESS) {
@@ -833,6 +846,11 @@ static bool on_key(const keypress_t* k) {
     }
     if (ctrl && k->code == 'H') {
       panel_open(PANEL_HISTORY);
+      return true;
+    }
+    if (ctrl && k->code == 'J') {
+      notice_close();
+      panel_open(PANEL_DOWNLOADS);
       return true;
     }
     if (k->code == VK_F5) {
@@ -1051,6 +1069,9 @@ void exports_app_on_input(app_input_t* event) {
       /* The window coming back doesn't give the page keys we're using. */
       to_page = !event->val.focus || g_focus == FOCUS_PAGE;
       break;
+    case UMBRA_CHORIUM_TYPES_INPUT_FILES_PICKED:
+      files_picked(&event->val.files_picked);
+      break;
     case UMBRA_CHORIUM_TYPES_INPUT_BACK:
       if (g_fullscreen) {
         exit_fullscreen();
@@ -1129,6 +1150,12 @@ void exports_app_on_page_event(uint32_t page_id, app_page_event_t* event) {
           context_menu_open(&e->val.context_menu.f1, page_area());
         }
         break;
+      case UMBRA_BROWSER_BROWSER_BROWSER_EVENT_DOWNLOAD:
+        downloads_event(&e->val.download);
+        break;
+      case UMBRA_BROWSER_BROWSER_BROWSER_EVENT_FILE_CHOOSER:
+        file_chooser_event(e->val.file_chooser.f0, &e->val.file_chooser.f1);
+        break;
       case UMBRA_BROWSER_BROWSER_BROWSER_EVENT_DIALOG:
         /* No dialog UI yet: accept, with the page's default prompt text. */
         umbra_browser_browser_dialog_reply(e->val.dialog.f0,
@@ -1148,4 +1175,10 @@ void exports_app_on_resume(void) { draw(); }
 
 /* The tabs stay open: the host closes the pages, and the saved session
  * (chorium.wasm) keeps them for next time. */
-void exports_app_on_stop(void) {}
+void exports_app_on_stop(void) {
+  char clear[16] = "";
+  get_setting("clear-site-data-on-close", clear, sizeof clear);
+  if (strcmp(clear, "true") == 0) {
+    umbra_browser_browser_clear_site_data();
+  }
+}

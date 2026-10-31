@@ -18,6 +18,11 @@
 
 #include "host.h"
 
+/* Same bounded C buffers as the rest of the native drawing runtime. */
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+#endif
+
 namespace {
 
 ID2D1Factory* g_d2d;
@@ -62,6 +67,8 @@ const wchar_t kIcons[] = {
     0xE922,  // maximize
     0xE923,  // restore
     0xE8BB,  // close-window
+    0xE896,  // download
+    0xE8B7,  // folder
 };
 constexpr int kMenuIcon = 6;
 
