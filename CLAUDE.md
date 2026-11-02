@@ -1,5 +1,66 @@
 # Umbra: notes for Claude Code
 
+## Site crashes and Tor startup badge release (2026-11-02, latest)
+
+Latest Android package: Chorium-157.0.8103.15-Android-arm64-20261102-Site-Tor.apk.
+SHA-256: f345bca6c909af46ba0b08a1adbf4d1cd2db3bb8a327353436c2f0bc139117c0.
+It combines the renderer service, 120 fps and InstalledApp API fixes below
+with the updated shared browser.wasm. It supersedes the intermediate APKs.
+Original signer, 16 KB zip alignment and CRC verified. 511 native/resource/
+asset entries are unchanged; browser.wasm is the only intentional non-DEX
+payload change. No native libraries were rebuilt or patched.
+
+Cold-launch sampling showed Tor's real state at 30% for ~3 seconds then 100%;
+the existing native poll/redraw worked, but the Tor badge remained static and
+the address percentage was hidden by restored URLs/panels. The shared app
+badge now reads "Tor N%" until ready, then "Tor", or "Tor failed" on error.
+Percentages are the real bootstrap values; this is not a synthetic smooth
+counter or continuous spinner. The new real startup badge test fails on the
+previous APK and passes on the updated Windows app (27%, 84%, ready).
+
+Rebuilt Wasm with the pinned wasi-sdk 34, wit-bindgen 0.63 and wac 0.12 under
+Ubuntu WSL, without recreating Docker/Chromium caches. Tool release digests
+verified. browser.wasm SHA-256:
+9d089221c1e3bfc90415c4ba8447b1ad9db676837012d38deca96509382a860b.
+Windows portable folder: C:\me-tor\Chorium\Chorium-Windows-20261102.
+ZIP: Chorium-157.0.8103.15-Windows-x64-20261102-Site-Tor.zip, SHA-256
+ee19b6f7a7a976a8a3b03717f39220de5f9459283999520b0f09f0d2ca546e47.
+All 15 Windows payload files verified against the ZIP; only apps/browser.wasm
+differs from the earlier portable folder. The old packages remain available.
+
+chatgpt.com rendered its logged-out landing page and message box in Direct
+and Tor modes, remaining alive for 30 seconds each with no renderer
+termination errors. Screenshots and logs retained; no login or chat submitted.
+The new installed-app regression reproduced Target crashed before the fix
+and passed afterward. Intermediate site-fix-only APK suite: 30 tests,
+28 pass, 2 desktop-only skips, zero failures, with 120 fps animation.
+Final combined Android suite: 31 tests, 29 pass, two desktop-only skips,
+zero failures in 165 seconds. Tor badge visibly showed 30% then ready; the
+page animation test measured 120 fps. Windows startup badge test passed.
+Validation logs and ChatGPT screenshots are retained under the release
+folder's validation directory. Normal app data was preserved throughout.
+
+## Installed-app API renderer crash fix (2026-11-02)
+
+The normal phone profile entered a renderer restart loop despite the earlier
+passing suite. Logs showed reason 123 bad IPC: no binder for
+blink.mojom.InstalledAppProvider. This embedder exposes Blink's stable
+navigator.getInstalledRelatedApps API without implementing its browser-side
+provider. A new real page at tests/e2e/pages/installed-app.html reproduces
+"Target crashed" on the previous APK, and passes with the fix.
+
+ChoriumActivity disables the InstalledApp Blink feature before native startup
+using disable-blink-features, preserving other entries. Websites detect the
+API as unsupported. Bad-IPC checks and the renderer sandbox stay enabled.
+The shared switch-merging helper also retains the existing 120 Hz policy.
+Repackage helper: chorium/tools/patch_android_installed_app.py, applied after
+the renderer and frame-rate helpers. No native/GN rebuild was performed.
+
+New APK: Chorium-157.0.8103.15-Android-arm64-20261102-Pixel-site-fix.apk.
+SHA-256: 409d8b831c8c6719c8780c8ddb60d6ba769149ccf24534903f8b0805f5664a5b.
+Original signature, 16 KB zip alignment, CRC and all 512 unchanged native,
+resource and asset payloads verified. This supersedes the earlier APKs below.
+
 ## Android high refresh rate fix (2026-11-02)
 
 The Pixel trace showed real 8333 us vsync and renderer BeginFrames (120 Hz),

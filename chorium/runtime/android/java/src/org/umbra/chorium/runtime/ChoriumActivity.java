@@ -74,6 +74,7 @@ public class ChoriumActivity extends Activity {
         // Chorium takes no command line from outside (no switch can turn Tor off).
         if (!CommandLine.isInitialized()) CommandLine.init(null);
         configurePageFrameRate();
+        configureInstalledAppApi();
         // As content shell: a phone gets Chrome's mobile user agent.
         DeviceUtils.updateDeviceSpecificUserAgentSwitch(this);
         LibraryLoader.getInstance().ensureInitialized();
@@ -142,15 +143,25 @@ public class ChoriumActivity extends Activity {
         // Chromium enables this battery-saving cap by default on Android. The
         // window can run at 120 Hz while requestAnimationFrame still runs at 60.
         // Set this before native startup so child renderers inherit the policy.
+        disableBrowserFeature("disable-features", "ThrottleMainFrameTo60Hz");
+    }
+
+    private static void configureInstalledAppApi() {
+        // This embedder has no InstalledAppProvider binder. Exposing its Blink
+        // API lets websites trigger a bad-IPC renderer termination. Advertise
+        // the API as unsupported so normal website feature detection works.
+        disableBrowserFeature("disable-blink-features", "InstalledApp");
+    }
+
+    private static void disableBrowserFeature(String switchName, String feature) {
         CommandLine commandLine = CommandLine.getInstance();
-        String disabled = commandLine.getSwitchValue("disable-features");
-        String feature = "ThrottleMainFrameTo60Hz";
+        String disabled = commandLine.getSwitchValue(switchName);
         if (disabled == null || disabled.isEmpty()) {
             disabled = feature;
         } else if (!("," + disabled + ",").contains("," + feature + ",")) {
             disabled += "," + feature;
         }
-        commandLine.appendSwitchWithValue("disable-features", disabled);
+        commandLine.appendSwitchWithValue(switchName, disabled);
     }
 
     private void startApp() {

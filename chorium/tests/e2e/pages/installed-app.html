@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Installed-app feature detection</title>
+<p id="result">Checking installed-app support</p>
+<script>
+(async () => {
+  const result = document.getElementById('result');
+  if (typeof navigator.getInstalledRelatedApps === 'function') {
+    try {
+      const apps = await navigator.getInstalledRelatedApps();
+      result.textContent = 'API returned ' + apps.length;
+    } catch (error) {
+      result.textContent = 'API rejected: ' + error.name;
+    }
+  } else {
+    result.textContent = 'API unsupported';
+  }
+  document.title = 'Installed-app check complete';
+})();
+</script>

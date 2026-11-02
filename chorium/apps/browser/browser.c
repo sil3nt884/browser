@@ -529,11 +529,20 @@ static void draw_toolbar(const tab_info_t* active, size_t tab_count) {
                          (int)box.height);
   if (!editing) {
     /* Which way pages connect, always in view: Tor, or Direct (Tor off). */
+    char status[32];
     const char* tag = tor_on ? "Tor" : "Direct";
+    if (tor_on && tor >= 0 && tor < 100) {
+      /* Keep bootstrap progress visible with a restored URL or open panel,
+       * too. The runtime redraws when Tor reports a new percentage. */
+      snprintf(status, sizeof status, "Tor %d%%", tor);
+      tag = status;
+    } else if (tor_on && tor < 0) {
+      tag = "Tor failed";
+    }
     int tag_w = text_width(tag, 11.5f) + 16;
     rect_t pill = rect(box.x + (int)box.width - tag_w - 8,
                        box.y + ((int)box.height - 20) / 2, tag_w, 20);
-    fill_round(pill, 10, tor_on ? T->accent : T->error);
+    fill_round(pill, 10, tor_on && tor >= 0 ? T->accent : T->error);
     text_in(rect(pill.x + 8, pill.y, tag_w - 8, 20), tag, 11.5f, 0xFFFFFFFF);
     text_box.width = (uint32_t)((int)text_box.width - tag_w - 4 > 0
                                     ? (int)text_box.width - tag_w - 4

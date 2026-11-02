@@ -271,6 +271,21 @@ class Sandbox(ChoriumTest):
 
 
 class Regressions(ChoriumTest):
+    def test_installed_app_feature_detection_keeps_page_alive(self):
+        self.b.set_tor(False)
+        page = self.b.go(SERVER.url('/pages/installed-app.html'), 'installed-app.html')
+        deadline = time.monotonic() + 10
+        while page.eval('document.title') != 'Installed-app check complete':
+            self.assertLess(time.monotonic(), deadline, 'installed-app API never completed')
+            time.sleep(0.1)
+        if self.t.phone:
+            self.assertEqual(page.eval("document.getElementById('result').textContent"),
+                             'API unsupported')
+        time.sleep(2)
+        self.assertEqual(page.eval('document.title'), 'Installed-app check complete')
+        page.close()
+        self.home().close()
+
     def test_address_bar_keeps_focus_during_page_updates(self):
         page = self.home()
         page.eval("setInterval(() => { document.body.style.backgroundColor = "
@@ -542,6 +557,29 @@ class Regressions(ChoriumTest):
         self.b.set_tor(True)
         self.r.wait_text("Tor", exact=True)
         self.assertTrue(self.r.state()["tor_enabled"])
+
+    def test_tor_startup_badge_tracks_bootstrap(self):
+        if not NETWORK:
+            self.skipTest("needs the internet (run.py --network)")
+        deadline = time.monotonic() + 60
+        seen = []
+        pending_seen = False
+        while time.monotonic() < deadline:
+            progress = self.r.state()['tor']
+            self.assertGreaterEqual(progress, 0, 'Tor bootstrap failed')
+            texts = [element.text for element in self.b.toolbar_texts()]
+            if progress < 100:
+                pending_seen = True
+                # The state read can precede the native redraw by one frame.
+                if f'Tor {progress}%' in texts and (not seen or seen[-1] != progress):
+                    seen.append(progress)
+            elif 'Tor' in texts:
+                if pending_seen:
+                    self.assertTrue(seen, 'Tor connected without displaying bootstrap progress')
+                print(f'\n    Tor badge startup progress observed: {seen} -> ready', end=' ')
+                return
+            time.sleep(0.05)
+        self.fail('Tor status badge did not reach its ready state')
 
     def test_pages_go_through_tor(self):
         if not NETWORK:
