@@ -11,6 +11,7 @@ import org.chromium.base.ContextUtils;
 import org.chromium.base.PathUtils;
 import org.chromium.base.library_loader.LibraryLoader;
 import org.chromium.base.library_loader.LibraryProcessType;
+import org.chromium.content_public.browser.ChildProcessCreationParams;
 import org.chromium.net.NetworkChangeNotifier;
 import org.chromium.ui.base.ResourceBundle;
 
@@ -19,6 +20,18 @@ import org.chromium.ui.base.ResourceBundle;
  * and Chromium's page, GPU and network processes, which are services with a ":" in their name.
  */
 public class ChoriumApplication extends Application {
+    private void configureRendererServices() {
+        // Android 17 can select native-only services, which bypass the
+        // JNI_OnLoad hook this embedder requires. Explicitly choose the Java
+        // child services; their isolatedProcess sandbox stays enabled.
+        ChildProcessCreationParams.set(getPackageName(), getPackageName(),
+                /* isExternalSandboxedService= */ false,
+                LibraryProcessType.PROCESS_CHILD,
+                /* bindToCallerCheck= */ false,
+                /* ignoreVisibilityForImportance= */ false,
+                /* forceNativeSandboxedService= */ false);
+    }
+
     private static boolean isBrowserProcess() {
         return !ContextUtils.getProcessName().contains(":");
     }
@@ -32,6 +45,7 @@ public class ChoriumApplication extends Application {
                         ? LibraryProcessType.PROCESS_BROWSER
                         : LibraryProcessType.PROCESS_CHILD);
         if (isBrowserProcess()) {
+            configureRendererServices();
             PathUtils.setPrivateDataDirectorySuffix("chorium");
             ApplicationStatus.initialize(this);
         }

@@ -271,6 +271,22 @@ class Sandbox(ChoriumTest):
 
 
 class Regressions(ChoriumTest):
+    def test_address_bar_keeps_focus_during_page_updates(self):
+        page = self.home()
+        page.eval("setInterval(() => { document.body.style.backgroundColor = "
+                  "Date.now() % 2 ? '#f0f0ff' : '#ffffff'; }, 50)")
+        self.b.focus_address()
+        self.r.type("https://example.com/focus-")
+        time.sleep(2)
+        self.r.type("retained")
+        self.r.wait_text("https://example.com/focus-retained", exact=True)
+        # Phone input goes through the actually focused Android view's IME.
+        # A page stealing focus would receive the suffix instead of the URL.
+        self.r.key(ord("A"), CTRL)
+        self.r.type(SERVER.url("/pages/second.html"))
+        self.r.key(VK_RETURN)
+        self.b.page("/pages/second.html")
+
     def test_window_open_w3schools(self):
         if not NETWORK:
             self.skipTest("needs --network")

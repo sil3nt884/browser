@@ -1,5 +1,35 @@
 # Umbra: notes for Claude Code
 
+## Pixel 11 compatibility fix (2026-11-02)
+
+Android 17 (SDK 37) selected NativeOnlySandboxedProcessService. Its weak
+NativeInitializationHook returns false, while Chorium only installs its
+initialization in JNI_OnLoad; renderers repeatedly aborted before loading
+pages and disrupted address focus. ChoriumApplication now calls the public
+ChildProcessCreationParams.set API once in the browser process, explicitly
+setting forceNativeSandboxedService=false before child allocation. This
+selects the existing isolated Java services; the sandbox stays enabled.
+An Activity command-line feature switch did not reliably control the early
+Java service selection and is not part of the final fix.
+
+The original Chromium build cache was deleted during cleanup. A small source
+checkout was restored in the current writable workspace, not C:\me-tor\umbra.
+The Pixel update is a Java compatibility repackage of the verified October
+APK, with a matching Java source change and a guarded repackaging tool at
+chorium/tools/patch_android_renderer_compat.py. Native libraries, manifest,
+resources and Wasm are unchanged (512 payload entries checked). APK signature
+matches the original certificate; 16 KB zip alignment and CRC checks pass.
+No full GN/native rebuild or Java Error Prone run was performed for this
+repackage. See chorium/PIXEL_FIX_2026-11-02.md for exact tooling and evidence.
+
+Installed and tested on Pixel 11 69170DLKY003RS: 29 real-app tests, 26 pass,
+two desktop-only skips, and the existing 60 fps / 120 Hz test fails. All four
+address tests pass, including retaining focus during continuous page updates.
+Tor, popup requests, downloads/uploads, site data and isolated renderer UID
+checks pass. UI tests require an unlocked phone; keep it awake during the run
+and restore stay_on_while_plugged_in afterward. Normal app data was preserved.
+New APK: C:\me-tor\Chorium\Chorium-157.0.8103.15-Android-arm64-20261102-Pixel-compat.apk.
+
 ## Final release and cleanup handoff (2026-10-31)
 
 Latest portable Windows app: `C:\me-tor\Chorium\Chorium-Windows-Final\Chorium.exe`.
