@@ -23,13 +23,9 @@ import android.window.OnBackInvokedDispatcher;
 import android.widget.FrameLayout;
 import android.widget.Toast;
 
-import org.chromium.base.CommandLine;
-import org.chromium.base.library_loader.LibraryLoader;
-import org.chromium.base.library_loader.LibraryProcessType;
 import org.chromium.build.annotations.Nullable;
 import org.chromium.content_public.browser.BrowserStartupController;
 import org.chromium.content_public.browser.BrowserStartupController.StartupMetrics;
-import org.chromium.content_public.browser.DeviceUtils;
 import org.chromium.ui.base.ActivityWindowAndroid;
 import org.chromium.ui.base.IntentRequestTracker;
 
@@ -71,13 +67,11 @@ public class ChoriumActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // Chorium takes no command line from outside (no switch can turn Tor off).
-        if (!CommandLine.isInitialized()) CommandLine.init(null);
-        configurePageFrameRate();
-        configureInstalledAppApi();
-        // As content shell: a phone gets Chrome's mobile user agent.
-        DeviceUtils.updateDeviceSpecificUserAgentSwitch(this);
-        LibraryLoader.getInstance().ensureInitialized();
+        if (!ChoriumBootstrap.prepareBrowser(this)) {
+            Toast.makeText(this, "The engine didn't start", Toast.LENGTH_LONG).show();
+            finish();
+            return;
+        }
         mDataDir = getFilesDir().getPath();
         String testProfile = getIntent() != null ? getIntent().getStringExtra("data_dir") : null;
         if (getIntent() != null && getIntent().getBooleanExtra("remote_control", false)
@@ -120,9 +114,7 @@ public class ChoriumActivity extends Activity {
                 /* occlusionTrackingAllowed= */ true);
         mIntentRequestTracker.restoreInstanceState(savedInstanceState);
 
-        BrowserStartupController.getInstance().startBrowserProcessesAsync(
-                LibraryProcessType.PROCESS_BROWSER, /* startGpuProcess= */ true,
-                /* startMinimalBrowser= */ false, /* singleProcess= */ false,
+        ChoriumBootstrap.startBrowser(
                 new BrowserStartupController.StartupCallback() {
                     @Override
                     public void onSuccess(@Nullable StartupMetrics metrics) {
@@ -138,33 +130,9 @@ public class ChoriumActivity extends Activity {
                 });
     }
 
-    /** Let page animations use the display rate, including on high refresh rate phones. */
-    private static void configurePageFrameRate() {
-        // Chromium enables this battery-saving cap by default on Android. The
-        // window can run at 120 Hz while requestAnimationFrame still runs at 60.
-        // Set this before native startup so child renderers inherit the policy.
-        disableBrowserFeature("disable-features", "ThrottleMainFrameTo60Hz");
-    }
-
-    private static void configureInstalledAppApi() {
-        // This embedder has no InstalledAppProvider binder. Exposing its Blink
-        // API lets websites trigger a bad-IPC renderer termination. Advertise
-        // the API as unsupported so normal website feature detection works.
-        disableBrowserFeature("disable-blink-features", "InstalledApp");
-    }
-
-    private static void disableBrowserFeature(String switchName, String feature) {
-        CommandLine commandLine = CommandLine.getInstance();
-        String disabled = commandLine.getSwitchValue(switchName);
-        if (disabled == null || disabled.isEmpty()) {
-            disabled = feature;
-        } else if (!("," + disabled + ",").contains("," + feature + ",")) {
-            disabled += "," + feature;
-        }
-        commandLine.appendSwitchWithValue(switchName, disabled);
-    }
-
     private void startApp() {
+        if (isFinishing() || isDestroyed()) return;
+        ChoriumBootstrap.claimRuntime(this);
         mPageHost = new PageHost(this, mWindow);
         // Under the AppView, which leaves a hole where the page shows.
         mRoot.addView(mPageHost, 0, new FrameLayout.LayoutParams(1, 1));
@@ -447,12 +415,23 @@ public class ChoriumActivity extends Activity {
         mIntentRequestTracker.onActivityResult(requestCode, resultCode, data);
     }
 
-    @Override
-    protected void onDestroy() {
+    void stopRuntime() {
         if (mRunning) {
+            mAppView.setStopped();
+            // Retire the old views before closing their WebContents. Android
+            // may still deliver onStop after another Activity has taken over.
+            if (mPageHost != null) {
+                mPageHost.destroy();
+                mPageHost = null;
+            }
             ChoriumNativesJni.get().stop();
             mRunning = false;
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        ChoriumBootstrap.releaseRuntime(this);
         if (mPageHost != null) mPageHost.destroy();
         if (mWindow != null) mWindow.destroy();
         super.onDestroy();

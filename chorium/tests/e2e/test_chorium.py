@@ -18,7 +18,7 @@ import unittest
 
 from chorium_e2e import cdp
 from chorium_e2e.browser import Browser
-from chorium_e2e.remote import CTRL, VK_ESCAPE, VK_RETURN
+from chorium_e2e.remote import CTRL, VK_ESCAPE, VK_RETURN, Remote
 
 # Set by run.py.
 TARGET = None
@@ -271,6 +271,29 @@ class Sandbox(ChoriumTest):
 
 
 class Regressions(ChoriumTest):
+    def test_android_activity_relaunch_reuses_bootstrapped_process(self):
+        if not self.t.phone:
+            self.skipTest('Android lifecycle')
+        page = self.home()
+        value = uid()
+        page.eval(f"localStorage.setItem('bootstrap-relaunch', '{value}')")
+        page.close()
+        process = self.t.shell('pidof org.umbra.chorium').strip()
+        self.r.close()
+        # NEW_TASK | CLEAR_TASK destroys/recreates the Activity without a
+        # force-stop. Process-wide bootstrap state must remain valid.
+        self.t.shell('am start -W -n '
+                     'org.umbra.chorium/org.umbra.chorium.runtime.ChoriumActivity '
+                     '-f 0x10008000 --ez remote_control true --es data_dir e2e')
+        self.t.remote = Remote(9334, connect_timeout=30)
+        self.r = self.t.remote
+        self.assertEqual(self.t.shell('pidof org.umbra.chorium').strip(), process,
+                         'Activity relaunch replaced the browser process')
+        page = self.home()
+        self.assertEqual(page.eval("localStorage.getItem('bootstrap-relaunch')"), value)
+        self.assertEqual(page.eval('typeof navigator.getInstalledRelatedApps'), 'undefined')
+        page.close()
+
     def test_installed_app_feature_detection_keeps_page_alive(self):
         self.b.set_tor(False)
         page = self.b.go(SERVER.url('/pages/installed-app.html'), 'installed-app.html')

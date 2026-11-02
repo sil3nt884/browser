@@ -1,6 +1,40 @@
 # Umbra: notes for Claude Code
 
-## Site crashes and Tor startup badge release (2026-11-02, latest)
+## Process-aware Android bootstrap (2026-11-02, latest Android)
+
+ChoriumApplication and ChoriumActivity now delegate process-wide startup to
+ChoriumBootstrap. Attach selects browser/child roles using exact package-name
+equality, sets library type, and applies browser-only renderer/path/feature
+policy before native initialisation. Network monitoring and native browser
+preparation are idempotent per process. Child services retain their separate
+startup and isolated sandbox. Browser preparation failures are logged and
+shown through the Activity's startup-error UI. Browser async callbacks remain
+lifecycle-bound; finishing/destroyed Activities cannot start the app.
+
+The new same-process Activity relaunch test exposed overlapping Activity
+lifecycles: the old Activity's delayed teardown closed the replacement's
+WebContents. Bootstrap now explicitly claims/releases runtime ownership,
+stops the old runtime before starting the replacement, retires the old
+PageHost before native pages close, and disables late AppView focus/size
+callbacks. The test verifies unchanged PID, working navigation, persistent
+localStorage and retained InstalledApp policy. It now passes.
+
+APK: Chorium-157.0.8103.15-Android-arm64-20261102-Bootstrap.apk.
+SHA-256: 631f8fd1a1a5e03f059525b549506ee3029adb815e9e9b11a1858204c3ceacf4.
+Original signer, 16 KB alignment, CRC and all 512 unchanged non-DEX entries
+verified against Site-Tor, including UI Wasm and native libraries. GN sources
+include the new class; delivered APK is a matching Java-bytecode repackage,
+not a full native/GN or Java Error Prone build. See
+chorium/ANDROID_BOOTSTRAP.md and tools/patch_android_bootstrap.py. Windows
+remains the tested Site-Tor package below.
+Final Pixel suite: 32 tests, 30 pass, two desktop-only skips, zero failures
+in 164 seconds. Page animation remains 120 fps; cold startup, Activity
+handover, address focus/editing, InstalledApp regression, Tor startup/routing,
+site data, popups, uploads/downloads and isolated renderer UID checks pass.
+Logs: C:\me-tor\Chorium\validation\pixel-bootstrap-full-suite.log and
+pixel-bootstrap-lifecycle-final.log. Normal app data is preserved.
+
+## Site crashes and Tor startup badge release (2026-11-02, previous Android/current Windows)
 
 Latest Android package: Chorium-157.0.8103.15-Android-arm64-20261102-Site-Tor.apk.
 SHA-256: f345bca6c909af46ba0b08a1adbf4d1cd2db3bb8a327353436c2f0bc139117c0.

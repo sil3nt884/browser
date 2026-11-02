@@ -113,6 +113,12 @@ public class AppView extends View {
         sendSurface();
     }
 
+    /** Ignore late focus/size callbacks after ownership passes to another Activity. */
+    void setStopped() {
+        mStarted = false;
+        mFramePending = false;
+    }
+
     private boolean isDark() {
         int night = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
         return night == Configuration.UI_MODE_NIGHT_YES;

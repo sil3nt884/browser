@@ -97,6 +97,7 @@ android_library("runtime_java") {
     "java/src/org/umbra/chorium/runtime/AppView.java",
     "java/src/org/umbra/chorium/runtime/ChoriumActivity.java",
     "java/src/org/umbra/chorium/runtime/ChoriumApplication.java",
+    "java/src/org/umbra/chorium/runtime/ChoriumBootstrap.java",
     "java/src/org/umbra/chorium/runtime/ChoriumNatives.java",
     "java/src/org/umbra/chorium/runtime/RemoteControl.java",
   ]
