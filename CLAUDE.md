@@ -1,5 +1,31 @@
 # Umbra: notes for Claude Code
 
+## Android high refresh rate fix (2026-11-02)
+
+The Pixel trace showed real 8333 us vsync and renderer BeginFrames (120 Hz),
+while page requestAnimationFrame remained 60 fps. Android granted UID 10392
+120 Hz and the window requested 120 Hz. Chromium 157's cc/base/features.cc
+enables ThrottleMainFrameTo60Hz by default on Android. ChoriumActivity now
+disables that feature through CommandLine before native initialization;
+renderers inherit the setting. Existing disabled features are preserved and
+Activity recreation does not duplicate the entry. This is app startup policy,
+without changes to Chromium/native libraries or the sandbox. The existing
+frame-rate test measures 120 fps after installation, versus 60 fps before.
+
+The equivalent guarded APK bytecode helper is
+chorium/tools/patch_android_frame_rate.py. Run after the renderer compatibility
+helper on a fresh decoded October APK. Both Java fixes are in the new
+Chorium-157.0.8103.15-Android-arm64-20261102-Pixel-120Hz.apk.
+SHA-256: 8197f97d5e22102803c61128138260138927a6206af892755d6fa16db43c1480.
+Original signer, 16 KB zip alignment, CRC and 512 unchanged non-DEX payload
+entries verified. This remains a Java repackage, not a full native/GN build.
+Full regression validation is recorded in chorium/PIXEL_FIX_2026-11-02.md.
+Final full Pixel suite with network: 29 tests, 27 pass, two desktop-only skips,
+zero failures in 148 seconds; page animation measured 120 fps again. All four
+address tests, Tor routing, popups, downloads/uploads, persistent site data and
+isolated renderer UID checks pass. Retained log:
+C:\me-tor\Chorium\validation\pixel-full-120hz-suite-20261102.log.
+
 ## Pixel 11 compatibility fix (2026-11-02)
 
 Android 17 (SDK 37) selected NativeOnlySandboxedProcessService. Its weak

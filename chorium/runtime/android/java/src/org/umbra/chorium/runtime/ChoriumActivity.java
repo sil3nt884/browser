@@ -73,6 +73,7 @@ public class ChoriumActivity extends Activity {
         super.onCreate(savedInstanceState);
         // Chorium takes no command line from outside (no switch can turn Tor off).
         if (!CommandLine.isInitialized()) CommandLine.init(null);
+        configurePageFrameRate();
         // As content shell: a phone gets Chrome's mobile user agent.
         DeviceUtils.updateDeviceSpecificUserAgentSwitch(this);
         LibraryLoader.getInstance().ensureInitialized();
@@ -134,6 +135,22 @@ public class ChoriumActivity extends Activity {
                         finish();
                     }
                 });
+    }
+
+    /** Let page animations use the display rate, including on high refresh rate phones. */
+    private static void configurePageFrameRate() {
+        // Chromium enables this battery-saving cap by default on Android. The
+        // window can run at 120 Hz while requestAnimationFrame still runs at 60.
+        // Set this before native startup so child renderers inherit the policy.
+        CommandLine commandLine = CommandLine.getInstance();
+        String disabled = commandLine.getSwitchValue("disable-features");
+        String feature = "ThrottleMainFrameTo60Hz";
+        if (disabled == null || disabled.isEmpty()) {
+            disabled = feature;
+        } else if (!("," + disabled + ",").contains("," + feature + ",")) {
+            disabled += "," + feature;
+        }
+        commandLine.appendSwitchWithValue("disable-features", disabled);
     }
 
     private void startApp() {
