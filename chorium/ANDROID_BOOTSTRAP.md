@@ -65,3 +65,19 @@ failures**, 164 seconds. Animation measures **120 fps**. The focused same-
 process Activity relaunch test also passes independently. Logs are retained
 under `C:\me-tor\Chorium\validation`. Testing used an isolated profile;
 normal app data is preserved and the original screen setting is restored.
+
+## Redmi / Android 16 validation
+
+The same APK was installed on Redmi 24117RN76E (SDK 36, arm64, 4096-byte
+pages), and the installed base.apk hash matches the release hash above.
+The initial 32-test run had 29 passes, two desktop-only skips and one Tor
+ready-badge timeout at 20 seconds. The screen correctly showed Tor 30%.
+The toggle test now accepts actual connecting percentages, and still requires
+the ready badge with network tests, allowing 90 seconds for that network step.
+Its focused retest passed in 31 seconds. All 30 applicable scenarios passed
+across the full run plus retest; the original full log retains its timeout.
+No app rebuild or product-code change was needed. Animation measured 117 fps
+on the 120 Hz screen. ChatGPT's logged-out page and message box stayed alive
+in Direct and Tor modes for 30 seconds each, with no renderer terminations.
+No login or message submission was tested. Redmi logs/screenshots are retained
+alongside the Pixel validation. Normal app data was preserved.

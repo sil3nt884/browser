@@ -1,5 +1,35 @@
 # Umbra: notes for Claude Code
 
+## Android 16 Redmi bootstrap validation (2026-11-02)
+
+Installed the identical Bootstrap APK on Redmi 24117RN76E, serial
+6toz4p9pdm898p9d, Android 16 / SDK 36, arm64, 4096-byte pages. On-device
+base.apk SHA-256 matches 631f8fd1a1a5e03f059525b549506ee3029adb815e9e9b11a1858204c3ceacf4.
+HyperOS rejected two streamed USB updates with INSTALL_FAILED_USER_RESTRICTED
+despite the user enabling Install via USB. Copying the APK to Downloads,
+indexing it with MEDIA_SCANNER_SCAN_FILE and opening its MediaStore content
+URI launched the local installer; the user completed the security approval.
+file:// VIEW intents did not resolve. Derive the content URI by querying the
+specific filename; do not hardcode the old MediaStore ID. Installer backup
+is retained as Download/Chorium-Bootstrap-update.apk. Normal data preserved.
+
+First full suite: 32 tests in 259 seconds, 29 pass, two desktop-only skips,
+one timeout waiting 20 seconds for ready Tor after off/on. Screenshot showed
+valid Tor 30% progress. Corrected the toggle test to accept the real connecting
+badge, retaining an exact ready-Tor check with --network and a 90-second
+network budget. Focused retest passed in 31 seconds. All 30 applicable cases
+therefore passed across the full run and focused retest; do not describe the
+first full log as a single clean pass. No APK/product code changed for this.
+Page animation: 117 fps on the 120 Hz display. Lifecycle handover, all address
+tests, InstalledApp regression, routing, data, popups, files and sandbox pass.
+ChatGPT's logged-out page/message box stayed alive for 30 seconds in both
+Direct and Tor modes, with no renderer termination errors. No chat submitted.
+
+Retain redmi-bootstrap-full-suite.log, redmi-bootstrap-tor-retest.log and
+redmi-chatgpt-probe.log/screenshots in C:\me-tor\Chorium\validation. Original
+stay_on_while_plugged_in was 15 on this phone; restore 15 after tests (Pixel's
+original was 0). Same Bootstrap APK is now exercised on Android 16 and 17.
+
 ## Process-aware Android bootstrap (2026-11-02, latest Android)
 
 ChoriumApplication and ChoriumActivity now delegate process-wide startup to

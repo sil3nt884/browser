@@ -11,6 +11,7 @@ crash, Tor and its switch, theme, session restore, full screen, back, tabs,
 import os
 from contextlib import closing
 import random
+import re
 import sqlite3
 import struct
 import time
@@ -578,8 +579,14 @@ class Regressions(ChoriumTest):
         self.b.set_tor(False)
         self.r.wait_text("Direct", exact=True)
         self.b.set_tor(True)
-        self.r.wait_text("Tor", exact=True)
         self.assertTrue(self.r.state()["tor_enabled"])
+        # The badge legitimately shows real bootstrap progress after a restart.
+        # Switching policy is immediate; network readiness is a separate check.
+        self.r.wait_for(lambda: any(
+            item.text == 'Tor' or re.fullmatch(r'Tor \d{1,2}%', item.text or '')
+            for item in self.b.toolbar_texts()), 10, 'Tor status badge')
+        if NETWORK:
+            self.r.wait_text('Tor', exact=True, timeout=90)
 
     def test_tor_startup_badge_tracks_bootstrap(self):
         if not NETWORK:
